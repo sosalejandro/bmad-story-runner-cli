@@ -34,6 +34,7 @@ so Claude does not need to write inline Python or bash scripts.`,
 		newQAPendingCmd(),
 		newGateCheckCmd(),
 		newReconcileCmd(),
+		newWriteGateCmd(),
 	)
 
 	return root

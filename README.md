@@ -207,6 +207,30 @@ Output:
 
 ---
 
+### `bmad write-gate <progress-json> <story-id> <PASS|FAIL|CONCERNS>`
+
+Write (or overwrite) the QA gate YAML file for a story at `<docs_folder>/qa/gates/<story-id>.yml`. Creates the `qa/gates/` directory if it does not exist.
+
+```bash
+# Story passed QA
+bmad write-gate ./bmad-progress.json 2.9.subscription-management-endpoints PASS
+
+# Short ID also works (prefix matching)
+bmad write-gate ./bmad-progress.json 2.9 PASS
+
+# Story has concerns — supply them as a JSON array
+bmad write-gate ./bmad-progress.json 3.2 CONCERNS \
+  '[{"severity":"high","note":"missing retry on webhook"},{"severity":"mild","note":"no structured logging"}]'
+
+# Or use the --concerns flag
+bmad write-gate ./bmad-progress.json 3.2 FAIL \
+  --concerns '[{"severity":"high","note":"auth check bypassed"}]'
+```
+
+The story ID supports prefix matching: `2.9` resolves to `2.9.subscription-management-endpoints`.
+
+---
+
 ### `bmad gate-check <progress-json>`
 
 Read all gate YAML files from `<docs_folder>/qa/gates/*.yml` and print a `PASS/FAIL/CONCERNS` table. Exits non-zero if any story has `FAIL` or `CONCERNS`.
@@ -299,7 +323,11 @@ bmad set-status ./bmad-progress.json 2.8.story in-progress
 # 4. After dev completes, move to QA
 bmad set-status ./bmad-progress.json 2.8.story qa-review
 
-# 5. If QA finds concerns
+# 5. Write QA gate result (replaces cat/echo for gate files)
+bmad write-gate ./bmad-progress.json 2.8.story PASS
+# or with concerns:
+bmad write-gate ./bmad-progress.json 2.8.story CONCERNS \
+  '[{"severity":"high","note":"missing retry logic"}]'
 bmad add-concerns ./bmad-progress.json 2.8.story '[{"severity":"high","note":"..."}]'
 
 # 6. After CI passes, mark a single story complete
