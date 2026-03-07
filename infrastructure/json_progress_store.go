@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"go.uber.org/zap"
@@ -13,8 +14,9 @@ import (
 )
 
 // progressFileJSON is the on-disk representation, with time fields as strings for portability.
+// Version is json.Number to tolerate both int (1) and string ("1") in existing files.
 type progressFileJSON struct {
-	Version     int          `json:"version"`
+	Version     json.Number  `json:"version"`
 	DocsFolder  string       `json:"docs_folder"`
 	LastUpdated string       `json:"last_updated"`
 	Stories     []*storyJSON `json:"stories"`
@@ -77,8 +79,15 @@ func (s *JSONProgressStore) Load(path string) (*domain.ProgressFile, error) {
 		return nil, fmt.Errorf("parsing stories in %q: %w", path, err)
 	}
 
+	version := 1 // default
+	if v, err := raw.Version.Int64(); err == nil {
+		version = int(v)
+	} else if f, err := raw.Version.Float64(); err == nil {
+		version = int(f)
+	}
+
 	return &domain.ProgressFile{
-		Version:     raw.Version,
+		Version:     version,
 		DocsFolder:  raw.DocsFolder,
 		LastUpdated: lastUpdated,
 		Stories:     stories,
@@ -89,7 +98,7 @@ func (s *JSONProgressStore) Save(path string, progress *domain.ProgressFile) err
 	progress.LastUpdated = time.Now().UTC()
 
 	raw := progressFileJSON{
-		Version:     progress.Version,
+		Version:     json.Number(strconv.Itoa(progress.Version)),
 		DocsFolder:  progress.DocsFolder,
 		LastUpdated: progress.LastUpdated.Format(timeLayout),
 		Stories:     make([]*storyJSON, len(progress.Stories)),

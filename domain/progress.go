@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type ProgressFile struct {
 	Version     int       `json:"version"`
@@ -21,13 +24,20 @@ func (p *ProgressFile) CompleteIDs() map[string]bool {
 }
 
 // FindByID returns the story with the given ID, or nil.
+// Supports exact match or prefix match (e.g. "2.7" matches "2.7.payment-method-management").
+// If multiple stories share the same prefix, the first exact match wins; otherwise the first
+// prefix match is returned.
 func (p *ProgressFile) FindByID(id string) *Story {
+	var prefixMatch *Story
 	for _, s := range p.Stories {
 		if s.ID == id {
 			return s
 		}
+		if prefixMatch == nil && strings.HasPrefix(s.ID, id+".") {
+			prefixMatch = s
+		}
 	}
-	return nil
+	return prefixMatch
 }
 
 // EligibleStories returns pending stories with all blockers complete, optionally filtered by group.
