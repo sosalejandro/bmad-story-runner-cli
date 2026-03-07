@@ -95,6 +95,25 @@ bmad set-complete ./bmad-progress.json 2.8.checkout-session-verification
 
 ---
 
+### `bmad bulk-complete <progress-json> <story-id> [story-id ...]`
+
+Mark multiple stories complete in a single JSON write. Use when CI has passed for a batch of stories at once — e.g. after parallel QA agents have reviewed and approved a group.
+
+```bash
+bmad bulk-complete ./bmad-progress.json \
+  3.2.organization-members-repository \
+  4.4.feature-access-evaluator \
+  5.7.stripe-price-synchronization \
+  6.1.invoices-repository-service \
+  6.6.dunning-management
+```
+
+Sets `status=complete`, `ci_passed=true`, and `completed_at=now` for all listed stories in one atomic write. Stories not found in the progress file are reported as warnings; if some were completed and some not found, exits with a warning rather than non-zero so callers can continue.
+
+Use `bmad set-complete` when completing a single story. Use `bmad bulk-complete` when completing a batch after parallel QA or a shared CI run.
+
+---
+
 ### `bmad add-concerns <progress-json> <story-id> <concerns-json>`
 
 Append QA concerns to a story's `qa_concerns` array.
@@ -278,9 +297,13 @@ bmad set-status ./bmad-progress.json 2.8.story qa-review
 # 5. If QA finds concerns
 bmad add-concerns ./bmad-progress.json 2.8.story '[{"severity":"high","note":"..."}]'
 
-# 6. After CI passes, mark complete
+# 6. After CI passes, mark a single story complete
 bmad set-complete ./bmad-progress.json 2.8.story
 bmad mark-story-file ./docs/stories/2.8.story.md Done
+
+# 6b. After CI passes for a batch of stories at once (parallel QA scenario)
+bmad bulk-complete ./bmad-progress.json \
+  3.2.story-a 4.4.story-b 5.7.story-c 6.1.story-d
 
 # 7. After parallel background QA agents finish, reconcile all at once
 bmad reconcile ./bmad-progress.json
