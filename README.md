@@ -5,10 +5,10 @@ A Go CLI tool that replaces ad-hoc Python/bash scripts in the [BMAD Story Runner
 ## Installation
 
 ```bash
-go install github.com/sosalejandro/bmad-story-runner-cli@latest
+go install github.com/sosalejandro/bmad-story-runner-cli/cmd/bmad@latest
 ```
 
-Requires Go 1.24+. The binary is installed as `bmad-story-runner-cli`. Add `$(go env GOPATH)/bin` to your `$PATH` if not already present.
+Requires Go 1.24+. The binary is installed as `bmad`. Add `$(go env GOPATH)/bin` to your `$PATH` if not already present.
 
 ## Architecture
 
@@ -75,9 +75,14 @@ Update a single story's status and `last_updated`.
 ```bash
 bmad set-status ./bmad-progress.json 2.8.checkout-session-verification in-progress
 bmad set-status ./bmad-progress.json 2.8.checkout-session-verification qa-review
+
+# Short prefix also works — "2.8" resolves to "2.8.checkout-session-verification"
+bmad set-status ./bmad-progress.json 2.8 in-progress
 ```
 
 Valid statuses: `pending` | `in-progress` | `qa-review` | `complete` | `blocked`
+
+Story IDs support prefix matching: `2.8` will match `2.8.checkout-session-verification` if no exact match is found. If multiple stories share the same prefix, the first exact match wins.
 
 Exits non-zero with a structured error if the story ID is not found or the status is invalid.
 
