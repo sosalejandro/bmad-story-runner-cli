@@ -179,6 +179,38 @@ STORY        ACs    TASKS        TITLE
 
 ---
 
+### `bmad assign-groups <progress-json> <n>`
+
+Distribute all stories across N parallel groups by epic/module. Run this once after `bmad init` when setting up a multi-agent session.
+
+```bash
+bmad assign-groups ./docs/stories/bmad-progress.json 3
+
+# Re-balance after adding stories (overwrites existing assignments)
+bmad assign-groups ./docs/stories/bmad-progress.json 3 --force
+```
+
+Grouping strategy:
+- Stories that share the same top-level subdirectory (e.g. `epic-1/`) are always kept in the same group — agents working the same module conflict with each other.
+- For flat story layouts (no subdirectories), groups by the first numeric segment of the story ID (e.g. `"1"` from `"1.2.some-story"`).
+- Groups are balanced by story count using a greedy bin-packing algorithm, so each agent receives roughly the same amount of work.
+
+Output:
+```
+Assigned 15 stories across 3 groups:
+
+  Group 1: 5 stories  [epic-1]
+  Group 2: 6 stories  [epic-2, epic-3]
+  Group 3: 4 stories  [epic-4]
+```
+
+Flags:
+- `--force` — overwrite existing group assignments (for re-balancing)
+
+Exits non-zero if stories already have group assignments and `--force` is not set.
+
+---
+
 ### `bmad assign-session <progress-json> <group> <session-id>`
 
 Assign a session identifier to all unassigned stories in a parallel group. Used when a new agent joins a parallel session.
@@ -310,38 +342,63 @@ Valid `status` values: `pending` → `in-progress` → `qa-review` → `complete
 
 ## Typical Workflow
 
+### Sequential (single agent)
+
 ```bash
 # 1. Initialize
 bmad init ./docs/stories
 
-# 2. Check what's next
+# 2. Find and claim the first story
 bmad next ./docs/stories/bmad-progress.json
-
-# 3. Mark in progress before dev agent runs
 bmad set-status ./bmad-progress.json 2.8.story in-progress
 
-# 4. After dev completes, move to QA
+# 3. After dev completes, move to QA
 bmad set-status ./bmad-progress.json 2.8.story qa-review
 
-# 5. Write QA gate result (replaces cat/echo for gate files)
+# 4. Write QA gate result (replaces cat/echo for gate files)
 bmad write-gate ./bmad-progress.json 2.8.story PASS
 # or with concerns:
 bmad write-gate ./bmad-progress.json 2.8.story CONCERNS \
   '[{"severity":"high","note":"missing retry logic"}]'
 bmad add-concerns ./bmad-progress.json 2.8.story '[{"severity":"high","note":"..."}]'
 
-# 6. After CI passes, mark a single story complete
+# 5. After CI passes, mark complete and patch the story file
 bmad set-complete ./bmad-progress.json 2.8.story
 bmad mark-story-file ./docs/stories/2.8.story.md Done
 
-# 6b. After CI passes for a batch of stories at once (parallel QA scenario)
-bmad bulk-complete ./bmad-progress.json \
-  3.2.story-a 4.4.story-b 5.7.story-c 6.1.story-d
+# 6. Check overall progress
+bmad status ./bmad-progress.json
+```
 
-# 7. After parallel background QA agents finish, reconcile all at once
+### Parallel (multiple agents)
+
+```bash
+# ── Setup (done once by the primary agent) ────────────────────────────
+# 1. Initialize and distribute stories across 3 groups
+bmad init ./docs/stories
+bmad assign-groups ./docs/stories/bmad-progress.json 3
+
+# 2. Each agent claims a group and gets its first story
+bmad assign-session ./bmad-progress.json 1 session-agent-1   # agent 1
+bmad assign-session ./bmad-progress.json 2 session-agent-2   # agent 2
+bmad assign-session ./bmad-progress.json 3 session-agent-3   # agent 3
+
+# ── Each agent runs independently ─────────────────────────────────────
+bmad next ./bmad-progress.json --group 1 --filter-group
+bmad set-status ./bmad-progress.json 1.1.story in-progress
+# ... dev agent ... qa agent ...
+bmad set-complete ./bmad-progress.json 1.1.story
+bmad mark-story-file ./docs/stories/1.1.story.md Done
+
+# ── After parallel QA batch: reconcile all at once ────────────────────
+bmad gate-check ./bmad-progress.json
 bmad reconcile ./bmad-progress.json
 
-# 8. Check overall progress
+# Bulk-complete when CI has covered a batch
+bmad bulk-complete ./bmad-progress.json \
+  3.2.story-a 4.4.story-b 5.7.story-c
+
+# Overall progress across all groups
 bmad status ./bmad-progress.json
 ```
 
