@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 
 	"go.uber.org/zap"
 
@@ -14,6 +15,12 @@ func main() {
 		panic("failed to initialize logger: " + err.Error())
 	}
 	defer logger.Sync() //nolint:errcheck
+
+	// Ensure global log directory exists.
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		os.MkdirAll(filepath.Join(home, ".bmad"), 0755) //nolint:errcheck
+	}
 
 	root := cmd.NewRootCmd(logger)
 	if err := root.Execute(); err != nil {

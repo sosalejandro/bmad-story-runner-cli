@@ -402,6 +402,112 @@ bmad bulk-complete ./bmad-progress.json \
 bmad status ./bmad-progress.json
 ```
 
+### `bmad exec [--reason <why>] -- <command> [args...]`
+
+Wrap an arbitrary shell command with full audit logging and telemetry. Use this when the CLI doesn't have a native command for what you need — it captures the pattern so it can be built into the CLI later.
+
+```bash
+# Wrap a Python script that manipulates progress data
+bmad exec --reason "filter stories by status" -- python3 -c "import json; ..."
+
+# Wrap a jq query
+bmad exec --reason "extract story titles" -- jq '.stories[].title' bmad-progress.json
+```
+
+Stdin/stdout/stderr pass through transparently. Exit code matches the child process. Child process CPU time, peak RSS, and duration are captured in the log.
+
+Flags:
+- `--reason <why>` — why this command is being run (critical for pattern analysis)
+- `--context <cmd>` — which `bmad` command preceded this (auto-detected from last log entry)
+
+---
+
+### `bmad log show [--last N] [--type TYPE] [--global]`
+
+Human-readable view of recent audit log entries.
+
+```bash
+bmad log show                          # last 20 entries from project log
+bmad log show --last 50 --type exec    # last 50 exec entries
+bmad log show --global --since 2026-03-01
+```
+
+Flags:
+- `--last <n>` — number of entries (default: 20)
+- `--type <command|exec|session_start>` — filter by entry type
+- `--global` — read from global log (`~/.bmad/audit.jsonl`) instead of project log
+- `--project <path>` — override project log path
+- `--since` / `--until` — date range filter (YYYY-MM-DD)
+- `--json` — output raw JSONL instead of human-readable format
+
+---
+
+### `bmad log stats [--global]`
+
+Aggregated performance report with percentiles and memory metrics.
+
+```bash
+bmad log stats
+bmad log stats --global --since 2026-03-01
+```
+
+Output includes per-command count, avg/P50/P95/P99 duration, avg heap, peak RSS, error count, and top exec reasons.
+
+---
+
+### `bmad log patterns [--global]`
+
+Exec pattern analysis — identifies recurring workarounds that should become native CLI commands.
+
+```bash
+bmad log patterns
+bmad log patterns --global --min-count 3 --sort duration
+```
+
+Groups exec calls by reason, shows frequency, avg duration, avg child RSS, and estimates savings if native.
+
+Flags:
+- `--min-count <n>` — minimum occurrences to show (default: 2)
+- `--sort <count|duration|memory>` — sort order
+
+---
+
+### `bmad log rotate [--global]`
+
+Archive current log to `audit-YYYY-MM-DD.jsonl.gz` and start fresh.
+
+```bash
+bmad log rotate           # rotate project log
+bmad log rotate --global  # rotate global log
+```
+
+---
+
+## Audit Logging
+
+Every `bmad` command writes a structured JSONL audit entry to two locations:
+
+| Log | Path | Purpose |
+|-----|------|---------|
+| Project | `<docs-folder>/bmad-audit.jsonl` | Project-specific history |
+| Global | `~/.bmad/audit.jsonl` | Cross-project pattern analysis |
+
+Each entry includes:
+- **Session**: PWD (session identifier), PID, hostname, bmad version, Go version
+- **Command**: name, args, flags, raw string
+- **Result**: exit code, stdout/stderr sizes, error type
+- **Performance**: total/io_read/io_write/parse/logic milliseconds
+- **Memory**: heap alloc, total alloc, GC count/pauses, goroutines, peak RSS, mallocs/frees
+- **I/O**: files read/written, bytes, stories processed
+
+For `bmad exec` entries, child process metrics are also captured: duration, CPU time (user/sys), peak RSS, exit code.
+
+Global flags:
+- `--no-log` — disable audit logging for this invocation
+- `--max-log-size <size>` — auto-rotate when log exceeds size (e.g., `10MB`)
+
+Full reference: [docs/logging.md](docs/logging.md)
+
 ## Error Handling
 
 All commands exit non-zero on error and log structured errors via `uber/zap`. Sentinel errors are used for type-safe checking:
