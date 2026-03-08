@@ -16,8 +16,7 @@ func newInitCmd() *cobra.Command {
 		Short: "Scan a docs folder and create bmad-progress.json",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			docsFolder, err := filepath.Abs(args[0])
-			exitOnError(err)
+			docsFolder := args[0]
 
 			progressPath := filepath.Join(docsFolder, "bmad-progress.json")
 			store := infrastructure.NewJSONProgressStore(log)

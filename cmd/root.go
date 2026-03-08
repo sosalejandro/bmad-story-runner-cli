@@ -20,6 +20,12 @@ It manages progress tracking, story status, QA gates, and reconciliation
 so Claude does not need to write inline Python or bash scripts.`,
 	}
 
+	root.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		if len(args) > 0 && looksLikePath(args[0]) {
+			args[0] = absPath(args[0])
+		}
+	}
+
 	root.AddCommand(
 		newInitCmd(),
 		newStatusCmd(),
