@@ -54,6 +54,7 @@ so Claude does not need to write inline Python or bash scripts.`,
 		newReconcileCmd(),
 		newWriteGateCmd(),
 		newExecCmd(),
+		newListCmd(),
 		newLogCmd(),
 	)
 

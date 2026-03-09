@@ -1,6 +1,16 @@
 # bmad — BMAD Story Runner CLI
 
-A Go CLI tool that replaces ad-hoc Python/bash scripts in the [BMAD Story Runner skill](https://github.com/sosalejandro/bmad-story-runner-cli). It manages `bmad-progress.json`, story status transitions, QA gate checks, and reconciliation — all from a single binary.
+**The CLI companion for AI-assisted software development with the BMAD Method.** Built for Claude Code, Cursor, Windsurf, Copilot Workspace, and any AI coding agent that manages multi-story implementation workflows.
+
+`bmad` replaces ad-hoc Python/bash scripts with a single Go binary that tracks story progress, manages QA gates, resolves blockers, and coordinates parallel agent sessions — so your AI assistant spends tokens on code, not on reinventing progress management.
+
+**Key features for AI-assisted developers:**
+- **Progress tracking** — `bmad-progress.json` as the single source of truth across agent sessions
+- **Blocker resolution** — prefix-aware dependency matching (`2.1` resolves blockers on `2.1.payment-api`)
+- **Parallel agent coordination** — assign story groups, claim sessions, reconcile QA results
+- **Story filtering** — list and query stories by status, group, and blocker state
+- **Audit logging** — every CLI invocation is logged with performance metrics for workflow optimization
+- **Zero-config discovery** — `bmad init` scans your docs folder and builds the progress file automatically
 
 ## Installation
 
@@ -176,6 +186,60 @@ STORY        ACs    TASKS        TITLE
 2.8          6      33/33        Checkout Session Verification
 3.2          7      28/31        Payment Webhook Handler
 ```
+
+---
+
+### `bmad list <progress-json>`
+
+List stories with flexible filtering by group, status, and blocker resolution. Designed for AI agents that need to query progress state without parsing raw JSON.
+
+```bash
+# List all stories
+bmad list ./bmad-progress.json
+
+# Filter by parallel group
+bmad list ./bmad-progress.json --group 3 --filter-group
+
+# Filter by status
+bmad list ./bmad-progress.json --status pending
+
+# Show only unblocked stories (all blockers resolved)
+bmad list ./bmad-progress.json --unblocked-only
+
+# Show blocker IDs with resolution status (✓/✗)
+bmad list ./bmad-progress.json --show-blockers
+
+# Combine filters
+bmad list ./bmad-progress.json --group 2 --filter-group --status pending --unblocked-only --show-blockers
+```
+
+Output:
+```
+STATUS      | STORY ID                    | TITLE
+------------|-----------------------------|---------
+pending     | 2.1.payment-api             | Payment API
+pending     | 2.2.invoice-gen             | Invoice Generator
+
+2 stories listed.
+```
+
+With `--show-blockers`:
+```
+STATUS      | STORY ID                    | BLOCKERS
+------------|-----------------------------|---------
+pending     | 1.2.user-profile            | 1.1 (✓)
+blocked     | 2.2.invoice-gen             | 2.1 (✗)
+
+2 stories listed.
+```
+
+Blocker resolution uses prefix-aware matching — blocker `1.1` resolves against story `1.1.auth-service` and shows `✓` if that story is complete.
+
+Flags:
+- `--group <n>` + `--filter-group` — restrict to a specific parallel group
+- `--status <status>` — filter by status (`pending`, `in-progress`, `qa-review`, `complete`, `blocked`)
+- `--show-blockers` — show blocker IDs with resolution markers instead of title
+- `--unblocked-only` — only show stories whose blockers are all resolved (or have no blockers)
 
 ---
 
