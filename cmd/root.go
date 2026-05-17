@@ -38,7 +38,8 @@ so Claude does not need to write inline Python or bash scripts.`,
 	root.PersistentFlags().BoolVar(&noLog, "no-log", false, "Disable audit logging for this invocation")
 
 	root.AddCommand(
-		newInitCmd(),
+		newInitCmd(),     // v6 — sqlite init
+		newConfigCmd(),   // v6 — runtime config get/set
 		newStatusCmd(),
 		newSetStatusCmd(),
 		newSetCompleteCmd(),
