@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/sosalejandro/bmad-story-runner-cli/domain/state"
 )
@@ -11,14 +12,26 @@ import (
 // PortPool allocates contiguous port blocks from a per-repo range, persisting
 // the allocation through state.Envs. Pure allocator — port-pool knows nothing
 // about Docker (§12.4 SRP split).
+//
+// Concurrency: the same-process race (two goroutines both seeing the same
+// "free" block before either Reserve completes) is guarded by `mu`. The
+// cross-process race (two separate `bmad env up` invocations) is caught by
+// partial unique indexes on env_allocations.{pg,redis,otel}_port (migration
+// 0002) that turn it into a UNIQUE violation; Allocate retries on that.
 type PortPool struct {
 	cfg  TestEnvConfig
 	envs state.Envs
+	mu   sync.Mutex
 }
 
 func NewPortPool(cfg TestEnvConfig, envs state.Envs) *PortPool {
 	return &PortPool{cfg: cfg, envs: envs}
 }
+
+// maxAllocateRetries caps the retry loop for cross-process port races.
+// Each retry re-reads the in-use set and picks a new block, so progress is
+// guaranteed up to the point of pool exhaustion (which surfaces its own error).
+const maxAllocateRetries = 8
 
 // Allocate reserves the next free ports_per_story-sized block for storyID,
 // writes the env_allocations row, and returns the assigned ports.
@@ -33,35 +46,66 @@ func (p *PortPool) Allocate(ctx context.Context, storyID string) (state.EnvAlloc
 		return state.EnvAllocation{}, fmt.Errorf("port pool: ports_per_story must be >= 2 (got %d)", p.cfg.PortsPerStory)
 	}
 
-	used, err := p.envs.InUsePorts(ctx)
-	if err != nil {
-		return state.EnvAllocation{}, fmt.Errorf("port pool: load in-use: %w", err)
-	}
-	usedSet := make(map[int]bool, len(used))
-	for _, port := range used {
-		usedSet[port] = true
-	}
+	// Same-process lock — serialize allocation within this CLI invocation.
+	// Cross-process races are caught by the partial unique indexes (mig 0002)
+	// and the retry loop below.
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	block, err := p.findFreeBlock(usedSet)
-	if err != nil {
-		return state.EnvAllocation{}, err
-	}
+	var lastErr error
+	for attempt := 0; attempt < maxAllocateRetries; attempt++ {
+		used, err := p.envs.InUsePorts(ctx)
+		if err != nil {
+			return state.EnvAllocation{}, fmt.Errorf("port pool: load in-use: %w", err)
+		}
+		usedSet := make(map[int]bool, len(used))
+		for _, port := range used {
+			usedSet[port] = true
+		}
 
-	alloc := state.EnvAllocation{
-		StoryID:   storyID,
-		PGPort:    block[0],
-		RedisPort: block[1],
-		DBName:    dbName(storyID),
-	}
-	if len(block) >= 3 {
-		otel := block[2]
-		alloc.OtelPort = &otel
-	}
+		block, err := p.findFreeBlock(usedSet)
+		if err != nil {
+			return state.EnvAllocation{}, err
+		}
 
-	if err := p.envs.Reserve(ctx, alloc); err != nil {
-		return state.EnvAllocation{}, fmt.Errorf("port pool: persist allocation: %w", err)
+		alloc := state.EnvAllocation{
+			StoryID:   storyID,
+			PGPort:    block[0],
+			RedisPort: block[1],
+			DBName:    dbName(storyID),
+		}
+		if len(block) >= 3 {
+			otel := block[2]
+			alloc.OtelPort = &otel
+		}
+
+		if err := p.envs.Reserve(ctx, alloc); err != nil {
+			if isPortUniqueViolation(err) {
+				// Another process won this block — re-read in-use and try
+				// again with a fresh free-block computation.
+				lastErr = err
+				continue
+			}
+			return state.EnvAllocation{}, fmt.Errorf("port pool: persist allocation: %w", err)
+		}
+		return alloc, nil
 	}
-	return alloc, nil
+	return state.EnvAllocation{}, fmt.Errorf(
+		"port pool: exhausted %d retries against cross-process contention; last error: %w",
+		maxAllocateRetries, lastErr)
+}
+
+// isPortUniqueViolation tests if an error came from one of the env-port
+// partial unique indexes (migration 0002). modernc.org/sqlite surfaces these
+// as "UNIQUE constraint failed: env_allocations.pg_port" (etc.).
+func isPortUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed: env_allocations.pg_port") ||
+		strings.Contains(msg, "UNIQUE constraint failed: env_allocations.redis_port") ||
+		strings.Contains(msg, "UNIQUE constraint failed: env_allocations.otel_port")
 }
 
 // findFreeBlock walks the configured range in ports_per_story-sized steps,
