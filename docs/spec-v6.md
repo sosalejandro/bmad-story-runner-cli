@@ -589,32 +589,141 @@ End-to-end validation:
 14. **Observe behavior**: did orchestrator stay persona-pinned? Did L3 agents work cleanly? Did sprint-status.yaml update? Did PR open?
 15. **Stretch: 2-3 parallel stories** with test-env isolation; verify no port collisions, no shared-state issues
 
-## 11. Open questions for Opus Plan Mode pressure-test
+## 11. Open questions — status as of 2026-05-16 pressure-test
 
-1. **CLI command set size**: 37 commands is substantial. Is this the right granularity, or are we over-componentizing? Could some commands collapse (e.g., env up/down/cleanup into `bmad env <verb>`)?
+1. **CLI command set size** — RESOLVED → §12.1
+2. **State file format** — RESOLVED → §12.2
+3. **Orchestrator agent system prompt size** — RESOLVED → §12.3
+4. **Test-env-isolation skill granularity** — RESOLVED → §12.4
+5. **Checkpoint cadence** — RESOLVED → §12.5
+6. **Failure modes / stale containers** — RESOLVED → §12.6
+7. **Mobile lifecycle** — DEFERRED (see #338; no V6 design constraint identified)
+8. **Cross-project portability** — DEFERRED (revisit after second project adopts V6)
+9. **Migration cost for V4 users** — DEFERRED (mid-build; `bmad migrate` MVP first, hand-holding doc if friction surfaces)
+10. **Agent-teams future** — DEFERRED (no integration design needed pre-MVP)
+11. **CI integration** — DEFERRED (local-developer for MVP; headless pattern designed only if CI demand materializes)
+12. **Cost / observability — per-story token tracking** — RESOLVED → §12.7
 
-2. **State file format**: JSON for `bmad-progress.json` (V4 inheritance) vs SQLite for richer queries + ACID guarantees as parallel writers grow. Worth the migration cost?
+Original question framing preserved in git history (commit seeding `docs/spec-v6.md`).
 
-3. **Orchestrator agent system prompt size**: §4 sketch is dense. Will it fit reliably in agent context budget across many story iterations? Or do we need to split into orchestrator + dispatcher skills?
+## 12. Resolved decisions (2026-05-16 pressure-test)
 
-4. **Test-env-isolation skill granularity**: per-skill (test-env-isolation does ALL infra concerns) vs per-concern (separate skills for port-pool, docker-up, healthchecks, sweeper). SRP says split; convenience says combine.
+### 12.1 CLI command set — verb-namespaced, SRP-tight (~28 commands)
 
-5. **Checkpoint cadence**: every 4 stories is arbitrary. Should it adapt to story complexity (e.g., checkpoint after every N stories OR after a "complex" story like meal-prep)?
+**Decision**: collapse the 37-command surface into verb-namespaced groups where the noun is a coherent SRP unit. Keep root-level commands only for cross-cutting actions.
 
-6. **Failure modes**: orchestrator crash mid-batch. Recovery story: resume from CLI state. But what if Docker containers were brought up + orchestrator died before recording env_config in state? Stale orphans. Cleanup-orphans handles, but is it enough?
+**Concrete shape**:
 
-7. **Mobile lifecycle**: defer per #338. But is there a design question we should answer NOW that constrains V6 to be mobile-compatible later?
+- `bmad env <up|down|cleanup-orphans|status>` (was 4 root commands)
+- `bmad worktree <create|destroy|list|prune>` (was 3 root commands)
+- `bmad depguard <flip|status|history>` (was 2 root commands)
+- `bmad story <hydrate|status|checkpoint|next>` (collapses scattered story verbs)
+- `bmad sprint <plan|run|pause|resume|status>` (collapses scattered sprint verbs)
+- Root-level cross-cutters: `bmad init`, `bmad migrate` (V4→V6), `bmad system-check`, `bmad config <key> <value>`, `bmad dispatch <stage> <story-id>` (manual L3 invocation)
 
-8. **Cross-project portability**: is the test-env-isolation skill truly cross-project? Other projects may have different infra (mongo instead of postgres; rabbitmq instead of redis). The `.bmad-test-env.yml` accommodates this but template proliferation could be a maintenance burden.
+**Target count**: high-20s after collapse, not 37. Each verb-namespace is one Go package under `cmd/`.
 
-9. **Migration cost for V4 users**: is the `bmad migrate` command sufficient, or do users need a hand-holding doc?
+**Why**: SRP at the command level mirrors SRP at the package level. A flat 37-command surface is a smell — it implies the cmd/ tree has 37 files with no thematic grouping. Verb-namespacing creates 5-6 cohesive sub-packages, each with a single responsibility (env management, worktree lifecycle, depguard ratcheting, story unit, sprint orchestration).
 
-10. **Agent-teams future**: V6 orchestrator-subagent model is the right call now. When/if agent-teams becomes useful (retrospectives, design sessions per architecture doc), how does it integrate without disrupting V6 orchestrator?
+**Refactor pressure tolerated**: if a namespace's command list grows past ~5 verbs, that's a signal the namespace itself is doing too much — split it.
 
-11. **CI integration**: does the V6 orchestrator run as part of CI (e.g., nightly sprint execution)? Or is it strictly local-developer? If CI, what's the headless invocation pattern?
+### 12.2 State store — SQLite
 
-12. **Cost/observability**: each L3 agent dispatch consumes Claude tokens. At parallel-4 across many stories, costs accumulate. Should V6 track per-story token costs in `bmad-progress.json` for budget awareness?
+**Decision**: SQLite, NOT JSON. Migrate V4's `bmad-progress.json` semantics into `bmad-state.db` with schema versioning.
+
+**Why**: parallel-N orchestration is the V6 differentiator. With 4 stories executing concurrently and each L3 stage updating state (hydrated → atdd → impl → reviewed → committed), JSON read-modify-write races are inevitable. SQLite gives ACID + WAL + cheap query for "what's blocked," "what's in-flight," "per-story token spend," "drift since last checkpoint."
+
+**Implications for `infrastructure/state/`**:
+
+- New `infrastructure/state/sqlite/` adapter; `infrastructure/state/json/` (V4) kept only for the `bmad migrate` one-shot import path
+- Domain interface: `domain/state/Store` — write-once interface; both adapters satisfy it
+- Schema lives in `infrastructure/state/sqlite/schema/` as numbered `.sql` files (golang-migrate style — reuse the nutrition-v2-go convention)
+- Initial schema: `stories`, `batches`, `worktrees`, `env_allocations`, `dispatches` (one row per L3 stage invocation, captures tokens + duration + status), `checkpoints`, `depguard_flips`
+
+**Concurrency model**: WAL mode by default; one writer per process. The orchestrator agent process and CLI-invoked sub-commands serialize through file lock; sub-commands that only read use a read-only connection.
+
+### 12.3 Orchestrator system prompt — template + render pipeline
+
+**Decision**: replace the monolithic system-prompt sketch in §4 with a **template + render** pipeline. CLI loads a structured template (text/template or XML), fills variables from current state, passes the rendered prompt to the agent at dispatch time.
+
+**Architecture**:
+
+- `infrastructure/prompts/templates/` — versioned template files, one per agent role (orchestrator, dispatcher-stage-N, checkpoint-summary, etc.) and per significant variant
+- Templates expose named slots: `{{.StoryId}}`, `{{.Mode}}`, `{{.HydratedFilePath}}`, `{{.PriorStageOutput}}`, `{{.SprintState}}`, etc.
+- Hard persona rules + try/finally infra lifecycle + mode dispatch table live in the template, NOT in the agent's session memory
+- Per-dispatch CLI step: load template → resolve variables from SQLite + filesystem → render → pass to agent as system prompt or first user message
+- Templates can be enriched at dispatch with extra context (current epic doc excerpt, failing test output from prior attempt, etc.) by passing additional named context blocks
+
+**Why**: a single monolithic orchestrator prompt at the size sketched in §4 risks context-budget overflow across long sessions. Templating lets each stage carry only what it needs. It also keeps prompts version-controlled, diffable, and reviewable — the same hygiene we apply to code.
+
+**Template format**: pick during build. Default-bet on Go `text/template` (zero deps, native variable substitution, supports conditionals + ranges for context blocks). XML files are equally viable if structured tooling around them helps — defer to whoever implements the prompts package.
+
+**SRP boundary**: `infrastructure/prompts/` owns load + render. `application/dispatch/` owns "what template + what context for this stage." Neither knows about the other's internals.
+
+### 12.4 Test-env-isolation — split per concern (SRP)
+
+**Decision**: split the proposed `test-env-isolation` skill into per-concern skills. Each is independently invocable, independently testable, independently versioned.
+
+**Split**:
+
+- `port-pool` — allocate/release port blocks from a configured range; persists allocations in SQLite (`env_allocations` table)
+- `docker-up` — render `.env.test` from allocated ports + `.bmad-test-env.yml` + bring up `docker-compose -f docker-compose.test.yml --env-file .env.test up -d`
+- `healthcheck` — poll service healthchecks with timeout per service from `.bmad-test-env.yml`
+- `sweeper` — query Docker for `[bmad-test-env]-*` labels; cross-reference SQLite `env_allocations` + worktree activity probe; tear down stale environments
+
+**Why**: each concern has its own failure modes, retry semantics, and observability needs. A fat skill couples them and makes "the docker-up step is flaky" indistinguishable from "the healthcheck timeout is wrong." Split, each skill is one diagnosable unit.
+
+**Composition**: `bmad env up <story>` orchestrates the four sequentially with try/finally cleanup. The composition lives in `application/env/` — the skills themselves know nothing about each other.
+
+### 12.5 Checkpoint cadence — both triggers (count + complexity)
+
+**Decision**: checkpoint fires on EITHER trigger:
+
+- **Count trigger**: every N stories (default 4; configurable via `bmad config checkpoint.count_threshold`)
+- **Complexity trigger**: after any story tagged `complexity: high` in its frontmatter (e.g., meal-prep state machine, LP solver, GraphQL→Huma cutover)
+
+Whichever fires first.
+
+**Why**: a flat count misses the moment a heavy slice lands and drift is most likely. A complexity-only trigger misses the slow accumulation of small drifts across N simple stories. Both keep the orchestrator honest at both granularities.
+
+**Implementation**: `story-checkpoint` skill consumes a `checkpoint_reason` parameter (`count` | `complexity:<story-id>`) so the summary it produces can foreground the right detail.
+
+### 12.6 Stale-environment detection — activity-based, not timestamp-based
+
+**Decision**: CLI tracks port allocations + worktree activity. Stale-environment detection is **activity-based**, not pure age-based.
+
+**Activity probe** (per worktree, run on sweeper invocation or `bmad env status`):
+
+- File mtime of any file inside the worktree changed in the last threshold window?
+- Git activity (commits, staged changes, branch updates) within window?
+- Most recent L3 dispatch return document timestamp within window?
+
+**Stale threshold**: configurable; default proposed as 2-3 hours but tune downward (maybe 30-60 minutes) once we observe real workloads. Live in `bmad-state.db` config table; `bmad config env.stale_threshold_minutes <N>` adjusts.
+
+**Auto-teardown**: stale env → `sweeper` skill brings it down + releases ports + marks `env_allocations` row as `reclaimed`.
+
+**Auto-respawn on resume**: when work resumes on a story whose env was reclaimed, the orchestrator detects the missing env via state-store lookup and re-runs `bmad env up <story>` transparently. No user prompt unless the original `env_config` had non-default settings worth confirming.
+
+**Why**: pure age-based sweep would kill an env mid-debugging-session if the user stepped away briefly. Activity-based sweep matches the actual signal — "no one is touching this" — and the resume path keeps the user's workflow invisible.
+
+### 12.7 Token cost tracking — per dispatch, in SQLite
+
+**Decision**: every L3 dispatch records token cost in the `dispatches` table (input_tokens, output_tokens, cache_read_tokens, cache_create_tokens, model, duration_ms). `bmad story status <id>` + `bmad sprint status` surface running totals.
+
+**Why**: enables cost fine-tuning during V6 maturation — which agents run hot, which stories blow budget, whether STRICT mode is worth the spend. Cheaper to collect from day one than retrofit.
+
+**Source**: Claude Code emits this metadata in tool/agent result payloads. The dispatcher reads it from the agent's return JSON and persists.
+
+## 13. Cascading rewrites required (build-prep punch list)
+
+These spec sections need rewrites to reflect §12 decisions before code starts. None block planning, but should land in the v2 branch as separate commits for reviewability:
+
+- **§3 (State schema)** — rewrite from JSON-extensions framing to SQLite schema (tables listed in §12.2)
+- **§4 (Orchestrator agent system prompt structure)** — rewrite as template + render pipeline (per §12.3); list the templates by name + their slot contracts
+- **§5 (Composable skills)** — replace `test-env-isolation` block with the four split skills (per §12.4); add `story-checkpoint` parameter contract for `checkpoint_reason` (per §12.5)
+- **§2 (V6 CLI command set)** — restructure to verb-namespaces (per §12.1); count should fall to high-20s
+- **§7 (Per-repo config schema)** — add `checkpoint.count_threshold`, `env.stale_threshold_minutes` keys
 
 ## Spec sign-off
 
-This spec captures the design as of 2026-05-17. Ready for Opus Plan Mode pressure-test against the 12 open questions above. Build phase begins after Plan Mode review + user approval.
+Original spec captured 2026-05-16. Pressure-test resolved Q1-Q6 + Q12 on 2026-05-16 (this revision). Q7-Q11 deferred. §13 lists the cascade rewrites that should land before code starts.
