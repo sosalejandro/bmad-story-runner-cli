@@ -1,0 +1,16 @@
+DROP TABLE IF EXISTS depguard_flip_history;
+DROP TABLE IF EXISTS depguard_flips;
+DROP TABLE IF EXISTS checkpoints;
+DROP INDEX IF EXISTS dispatches_story_idx;
+DROP TABLE IF EXISTS dispatches;
+DROP INDEX IF EXISTS env_allocations_reclaimed_idx;
+DROP TABLE IF EXISTS env_allocations;
+DROP TABLE IF EXISTS worktrees;
+DROP TABLE IF EXISTS batch_stories;
+DROP TABLE IF EXISTS batches;
+DROP TABLE IF EXISTS story_retry_counts;
+DROP TABLE IF EXISTS story_concerns;
+DROP TABLE IF EXISTS story_affects;
+DROP TABLE IF EXISTS story_dependencies;
+DROP TABLE IF EXISTS stories;
+DROP TABLE IF EXISTS config;
