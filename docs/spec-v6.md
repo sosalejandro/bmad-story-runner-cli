@@ -178,67 +178,185 @@ Each namespace stays at or below ~6 verbs. If a namespace grows past that during
 | `bmad assign-groups`          | `bmad sprint plan --assign-groups N`              |
 | `bmad mode <p\|s>`            | `bmad config mode <p\|s>`                         |
 
-## 3. State schema
+## 3. State schema — SQLite (per §12.2)
 
-### `bmad-progress.json` V6 extensions
+State store: `bmad-state.db` per docs-folder. SQLite + WAL mode. One writer per process (orchestrator + CLI sub-commands serialize through file lock); read-only consumers use a read-only connection.
 
-```json
-{
-  "version": 2,                                    // bumped from V4's 1
-  "docs_folder": "/abs/path/to/docs/stories",      // V4 preserved
-  "last_updated": "2026-05-17T14:00:00Z",
-  "mode": "pragmatic|strict",                      // V6 NEW (persistent)
-  "max_parallel": 4,                               // V6 NEW (user-set cap)
-  "reserve_ram_mb": 8000,                          // V6 NEW
-  "depguard_flips": {                              // V6 NEW
-    "no_infra_in_domain": "error",
-    "isp_narrow_ports": "warn",
-    "every_aggregate_eventrecorder": "warn",
-    "every_service_withid": "warn"
-  },
-  "stories": [
-    {
-      "id": "4.1",                                 // V4 preserved
-      "file": "4.1-identity-aggregates.md",        // V4 preserved
-      "title": "Identity Aggregates with EventRecorder",
-      "status": "complete|in-progress|blocked|pending|hydrating|reviewing|committing|env-up|env-down",  // V6 EXTENDED states
-      "current_stage": "hydrate|atdd|implement|automate|test-review|code-review|commit|finish|done",   // V6 NEW (per-story state machine)
-      "parallel_group": 1,                         // V4 preserved
-      "assigned_session": "session-abc123",        // V4 preserved
-      "blockers": [],                              // V4 preserved
-      "depends_on": ["3.1", "3.2"],                // V6 NEW (story-level deps)
-      "qa_concerns": [],                           // V4 preserved
-      "ci_passed": true,                           // V4 preserved
-      "completed_at": "2026-05-17T14:00:00Z",      // V4 preserved
-      // V6 NEW fields:
-      "worktree_path": ".worktrees/story-4.1",
-      "branch_name": "story/4.1-identity-aggregates",
-      "env_config": {
-        "pg_port": 7611,
-        "redis_port": 7612,
-        "otel_port": 7613,
-        "db_name": "story_4_1",
-        "container_ids": ["bmad-test-env-4.1-pg", "bmad-test-env-4.1-redis"]
-      },
-      "hydrated_file": "_bmad-output/implementation-artifacts/stories/4.1-identity-aggregates.md",
-      "resource_budget": { "ram_mb": 800, "cpu_cores": 0.6 },
-      "requires_android": false,
-      "retry_counts": { "tdd_cycles": 1, "qa_cycles": 0, "ci_retries": 0, "review_iterations": 1 },
-      "commit_hash": "abc1234",
-      "pr_url": "https://github.com/.../pull/501",
-      "affects": ["src/contexts/identity/"]        // V6 NEW (for file-overlap parallel detection)
-    }
-  ]
-}
+V4 `bmad-progress.json` is **read-only** input to `bmad migrate`; V6 writes only to SQLite. The two never coexist as authoritative state.
+
+### Schema layout
+
+Lives at `infrastructure/state/sqlite/schema/`, golang-migrate style — numbered `.sql` files (`0001_initial.up.sql`, `0001_initial.down.sql`, etc.). Schema version recorded in `schema_version` table; runtime refuses to open a DB whose version is newer than the binary supports.
+
+### Initial schema (`0001_initial.up.sql`)
+
+```sql
+CREATE TABLE schema_version (
+  version    INTEGER PRIMARY KEY,
+  applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ---------- Config (key/value) ----------
+CREATE TABLE config (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+-- Seeded on `bmad init`:
+--   docs_folder, mode (pragmatic|strict), max_parallel, reserve_ram_mb,
+--   pr_strategy, batch_size, max_tdd_cycles, max_qa_cycles, max_ci_retries,
+--   max_review_iterations, checkpoint.count_threshold (default 4),
+--   env.stale_threshold_minutes (default 120)
+
+-- ---------- Stories ----------
+CREATE TABLE stories (
+  id                         TEXT PRIMARY KEY,         -- "4.1"
+  file                       TEXT NOT NULL,            -- relative path under docs_folder
+  title                      TEXT NOT NULL,
+  status                     TEXT NOT NULL,            -- pending|hydrating|in-progress|reviewing|committing|env-up|env-down|complete|blocked
+  current_stage              TEXT,                     -- hydrate|atdd|implement|automate|test-review|code-review|commit|finish|done
+  parallel_group             INTEGER,
+  hydrated_file              TEXT,
+  resource_budget_ram_mb     INTEGER,
+  resource_budget_cpu_cores  REAL,
+  requires_android           INTEGER NOT NULL DEFAULT 0,  -- SQLite BOOLEAN
+  complexity                 TEXT NOT NULL DEFAULT 'medium',  -- low|medium|high (drives §12.5 trigger)
+  commit_hash                TEXT,
+  pr_url                     TEXT,
+  ci_passed                  INTEGER NOT NULL DEFAULT 0,
+  completed_at               TIMESTAMP,
+  created_at                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE story_dependencies (
+  story_id      TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  depends_on_id TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  PRIMARY KEY (story_id, depends_on_id)
+);
+
+CREATE TABLE story_affects (                 -- paths a story touches (file-overlap detection)
+  story_id TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  path     TEXT NOT NULL,
+  PRIMARY KEY (story_id, path)
+);
+
+CREATE TABLE story_concerns (                -- QA concerns appended over time
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  story_id    TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  appended_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  source      TEXT NOT NULL,                 -- agent role that flagged
+  body_json   TEXT NOT NULL
+);
+
+CREATE TABLE story_retry_counts (
+  story_id            TEXT PRIMARY KEY REFERENCES stories(id) ON DELETE CASCADE,
+  tdd_cycles          INTEGER NOT NULL DEFAULT 0,
+  qa_cycles           INTEGER NOT NULL DEFAULT 0,
+  ci_retries          INTEGER NOT NULL DEFAULT 0,
+  review_iterations   INTEGER NOT NULL DEFAULT 0
+);
+
+-- ---------- Batches (sprint-planning output) ----------
+CREATE TABLE batches (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  sequence_no  INTEGER NOT NULL UNIQUE,      -- batch order in sprint
+  status       TEXT NOT NULL,                -- planned|in-flight|complete
+  created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  started_at   TIMESTAMP,
+  completed_at TIMESTAMP
+);
+
+CREATE TABLE batch_stories (
+  batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+  story_id TEXT    NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  PRIMARY KEY (batch_id, story_id)
+);
+
+-- ---------- Worktrees ----------
+CREATE TABLE worktrees (
+  story_id         TEXT PRIMARY KEY REFERENCES stories(id) ON DELETE CASCADE,
+  path             TEXT NOT NULL UNIQUE,
+  branch_name      TEXT NOT NULL UNIQUE,
+  created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_activity_at TIMESTAMP                 -- refreshed by `env status` activity probe
+);
+
+-- ---------- Test-env allocations ----------
+CREATE TABLE env_allocations (
+  story_id       TEXT PRIMARY KEY REFERENCES stories(id) ON DELETE CASCADE,
+  pg_port        INTEGER NOT NULL,
+  redis_port     INTEGER NOT NULL,
+  otel_port      INTEGER,
+  db_name        TEXT NOT NULL,
+  container_ids  TEXT NOT NULL,               -- JSON array
+  created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  reclaimed_at   TIMESTAMP,                   -- non-NULL after sweeper teardown
+  reclaim_reason TEXT                         -- 'completed' | 'stale' | 'manual'
+);
+
+CREATE INDEX env_allocations_reclaimed_idx ON env_allocations(reclaimed_at);
+
+-- ---------- Dispatches (one row per L3 agent invocation; §12.7 cost tracking) ----------
+CREATE TABLE dispatches (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  story_id             TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  stage                TEXT NOT NULL,         -- hydrate|atdd|implement|automate|test-review|code-review|commit
+  agent_role           TEXT NOT NULL,         -- L3 agent name
+  attempt_no           INTEGER NOT NULL,
+  status               TEXT NOT NULL,         -- ok|blocked|errored
+  reason               TEXT,
+  input_tokens         INTEGER NOT NULL DEFAULT 0,
+  output_tokens        INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens    INTEGER NOT NULL DEFAULT 0,
+  cache_create_tokens  INTEGER NOT NULL DEFAULT 0,
+  model                TEXT,
+  duration_ms          INTEGER NOT NULL DEFAULT 0,
+  dispatched_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  returned_at          TIMESTAMP
+);
+
+CREATE INDEX dispatches_story_idx ON dispatches(story_id, stage);
+
+-- ---------- Checkpoints (§12.5) ----------
+CREATE TABLE checkpoints (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  triggered_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  trigger_kind         TEXT NOT NULL,        -- 'count' | 'complexity'
+  trigger_detail       TEXT,                 -- e.g. complexity:<story-id> or NULL
+  stories_since_last   INTEGER NOT NULL,
+  user_decision        TEXT,                 -- 'continue' | 'adjust' | 'halt'
+  decided_at           TIMESTAMP,
+  summary_json         TEXT NOT NULL         -- full checkpoint payload
+);
+
+-- ---------- Depguard flips ----------
+CREATE TABLE depguard_flips (
+  rule       TEXT PRIMARY KEY,
+  state      TEXT NOT NULL,                  -- 'warn' | 'error'
+  flipped_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE depguard_flip_history (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule       TEXT NOT NULL,
+  from_state TEXT NOT NULL,
+  to_state   TEXT NOT NULL,
+  flipped_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  reason     TEXT
+);
 ```
 
-### New state files
+### Filesystem artifacts that remain non-DB
 
 ```
-.worktree-allocations.yaml          # active worktree → story_id → port_range mapping
-.env.test (per worktree)            # env vars (PG_PORT, REDIS_PORT, etc.) for that story
+bmad-state.db                       # SQLite state store (this section)
+.env.test (per worktree)            # env vars rendered by `env up` for docker-compose
 .bmad-test-env.yml (per repo)       # project test-env config (port range, services, defaults)
+docker-compose.test.yml (per repo)  # project test infra topology (image set + label)
 ```
+
+`.worktree-allocations.yaml` from the V4-shaped sketch is **dropped** — `worktrees` + `env_allocations` tables replace it.
 
 ### `.bmad-test-env.yml` (per-repo) schema
 
@@ -266,11 +384,31 @@ default_resource_budget_by_stack:
   mobile-e2e: { ram_mb: 3500, cpu_cores: 1.5, requires_android: true }
 
 container_label: "[bmad-test-env]"   # for sweeper to identify orphans
-orphan_age_hours: 4                  # sweep threshold
 
 mobile:                              # future; per #338
   android_emulator: { enabled: false }
 ```
+
+Note: `orphan_age_hours` from the V4-shaped sketch is **dropped** — replaced by activity-based detection per §12.6 (`env.stale_threshold_minutes` in `config` table). Pure age-based sweep was too aggressive for the debugging workflow.
+
+### Adapter layout
+
+```
+domain/state/
+  Store         # interface — write-once contract; both adapters satisfy it
+  Stories       # narrow port (ISP) for story queries
+  Dispatches    # narrow port for dispatch insert + cost rollup
+  Envs          # narrow port for env allocation lifecycle
+  Worktrees     # narrow port for worktree lifecycle
+  Config        # narrow port for config get/set
+  Depguard      # narrow port for flip state
+  Checkpoints   # narrow port for checkpoint record/decision
+infrastructure/state/sqlite/        # the V6 adapter
+infrastructure/state/json/          # V4 read-only adapter (used by `bmad migrate` only)
+infrastructure/state/sqlite/schema/ # numbered migration files
+```
+
+ISP-keystone: no consumer pulls `domain/state.Store` whole; each command/skill depends on the narrow port for its concern.
 
 ## 4. Orchestrator agent system prompt structure
 
