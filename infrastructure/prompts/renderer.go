@@ -69,13 +69,44 @@ func (r *Renderer) Known() []string {
 // Render executes the named template with data and returns the rendered string.
 // data is typically a map[string]any or a typed struct; field names are
 // case-sensitive and access happens via text/template's dot syntax.
+//
+// If data is a map[string]any, the renderer pre-seeds any KNOWN optional
+// slots for the named template with safe zero values. This lets templates
+// use `{{if .Optional}}` cleanly even under missingkey=error strict mode.
+// Required slots are NOT seeded — those still surface as errors if missing.
+//
+// Typed-struct callers are responsible for their own zero values (a missing
+// field on a struct is a zero, not an error — text/template handles that).
 func (r *Renderer) Render(name string, data any) (string, error) {
 	if !r.known[name] {
 		return "", fmt.Errorf("unknown template %q (known: %v)", name, r.Known())
+	}
+	if m, ok := data.(map[string]any); ok {
+		seedOptionalSlots(name, m)
 	}
 	var buf bytes.Buffer
 	if err := r.tmpl.ExecuteTemplate(&buf, name, data); err != nil {
 		return "", fmt.Errorf("render %s: %w", name, err)
 	}
 	return buf.String(), nil
+}
+
+// seedOptionalSlots pre-populates the named template's optional slots when
+// the caller passed a map. Required slots are NOT touched — text/template's
+// missingkey=error still catches those at execute time.
+//
+// Add a case here when a template introduces a new optional slot.
+func seedOptionalSlots(template string, data map[string]any) {
+	switch template {
+	case "stage_implement":
+		setDefault(data, "PriorAttempt", (*struct{})(nil))
+		setDefault(data, "EpicContext", "")
+		setDefault(data, "IdempotencyKey", "")
+	}
+}
+
+func setDefault(m map[string]any, key string, value any) {
+	if _, ok := m[key]; !ok {
+		m[key] = value
+	}
 }

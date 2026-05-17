@@ -22,6 +22,22 @@ type Stories interface {
 	SetStatus(ctx context.Context, id string, status Status) error
 	SetCurrentStage(ctx context.Context, id string, stage *Stage) error
 	SetComplete(ctx context.Context, id string, commitHash, prURL string) error
+
+	// ClaimUnclaimedPending atomically picks up to `max` unclaimed stories
+	// whose status is pending AND whose ids are in `eligibleIDs`, marks them
+	// claimed by `claimedBy` with claimed_at = now, and returns the picked rows.
+	// Two concurrent callers cannot both claim the same story — the write
+	// transaction serializes the check + update.
+	//
+	// `eligibleIDs` should be pre-filtered by the caller (deps satisfied,
+	// affects disjoint, etc.) — this method only enforces "unclaimed +
+	// pending + in the candidate set."
+	ClaimUnclaimedPending(ctx context.Context, eligibleIDs []string, max int, claimedBy string) ([]Story, error)
+
+	// ReleaseClaim clears claimed_at + claimed_by for the given story —
+	// called on completion, on error-after-claim, or by the orchestrator's
+	// crash-resume reconciler when it decides to give a story back.
+	ReleaseClaim(ctx context.Context, id string) error
 }
 
 // StoryDependencies is the m:n bridge between a story and its prerequisites.

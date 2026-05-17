@@ -209,10 +209,19 @@ agent returns produces the same instruction.`,
 // ---------- next ----------
 
 func newStoryNextCmd() *cobra.Command {
-	var max int
+	var (
+		max     int
+		claim   bool
+		claimer string
+	)
 	cmd := &cobra.Command{
 		Use:   "next",
 		Short: "Emit a parallel-eligible next-action batch",
+		Long: `By default emits candidates WITHOUT mutating state (--claim=false).
+With --claim, atomically marks the picked stories claimed_at + claimed_by
+in a single transaction so two orchestrator iterations cannot both pick the
+same story. Always pass --claim in production orchestrator loops — the only
+no-claim use case is read-only inspection.`,
 		RunE: func(c *cobra.Command, args []string) error {
 			ctx := context.Background()
 			svc, cleanup, err := openStoryService(ctx)
@@ -225,13 +234,45 @@ func newStoryNextCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			if claim && len(actions) > 0 {
+				eligible := make([]string, 0, len(actions))
+				for _, a := range actions {
+					eligible = append(eligible, a.StoryID)
+				}
+				claimerName := claimer
+				if claimerName == "" {
+					claimerName = "orchestrator"
+				}
+				claimed, err := svc.Stories.ClaimUnclaimedPending(ctx, eligible, len(eligible), claimerName)
+				if err != nil {
+					return fmt.Errorf("story next --claim: %w", err)
+				}
+				// Filter actions down to the actually-claimed set (in case a
+				// concurrent orchestrator grabbed some between pick + claim).
+				claimedSet := make(map[string]bool, len(claimed))
+				for _, c := range claimed {
+					claimedSet[c.ID] = true
+				}
+				kept := actions[:0]
+				for _, a := range actions {
+					if claimedSet[a.StoryID] {
+						kept = append(kept, a)
+					}
+				}
+				actions = kept
+			}
+
 			return json.NewEncoder(os.Stdout).Encode(map[string]any{
 				"max":     max,
+				"claimed": claim,
 				"actions": actions,
 			})
 		},
 	}
 	cmd.Flags().IntVar(&max, "max-parallel", 0, "override max parallel slots (else uses config)")
+	cmd.Flags().BoolVar(&claim, "claim", true, "atomically claim returned stories (set claimed_at + claimed_by)")
+	cmd.Flags().StringVar(&claimer, "claimer", "orchestrator", "claimed_by value (e.g. session id)")
 	return cmd
 }
 
@@ -307,6 +348,11 @@ func newStoryCompleteCmd() *cobra.Command {
 			for _, id := range args {
 				if err := svc.Stories.SetComplete(ctx, id, commit, prURL); err != nil {
 					return fmt.Errorf("complete %q: %w", id, err)
+				}
+				// Release the claim so a future re-plan or admin set-status
+				// can re-route the story without claim leftover.
+				if err := svc.Stories.ReleaseClaim(ctx, id); err != nil {
+					return fmt.Errorf("release claim %q: %w", id, err)
 				}
 				fmt.Printf("%s -> complete\n", id)
 			}

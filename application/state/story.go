@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/sosalejandro/bmad-story-runner-cli/domain/state"
 )
@@ -171,18 +172,54 @@ func (s *StoryService) EvaluateCheckpoint(ctx context.Context, justCompletedID s
 		return &CheckpointResult{Fired: false}, nil
 	}
 
+	// Generate an idempotency key tied to the trigger semantics. Duplicate
+	// fires (e.g., on crash resume) hit the UNIQUE index, return ErrAlready,
+	// and we treat it as a no-op (the prior fire still stands).
+	key := checkpointKey(kind, justCompletedID, since)
+
 	id, err := s.Checkpoints.Fire(ctx, state.Checkpoint{
 		TriggerKind:      kind,
 		TriggerDetail:    ptrIfNonEmpty(detail),
 		StoriesSinceLast: since,
 		SummaryJSON:      `{"pending":"summary rendered by story-checkpoint skill"}`,
+		IdempotencyKey:   &key,
 	})
 	if err != nil {
+		if isUniqueViolation(err) {
+			// Idempotency hit — the orchestrator already fired this exact
+			// checkpoint trigger. Surface the existing row instead.
+			return &CheckpointResult{
+				Fired: false, TriggerKind: kind, TriggerDetail: detail,
+			}, nil
+		}
 		return nil, err
 	}
 	return &CheckpointResult{
 		Fired: true, TriggerKind: kind, TriggerDetail: detail, CheckpointID: id,
 	}, nil
+}
+
+// checkpointKey builds a deterministic idempotency key tied to the trigger.
+//
+//   - complexity: "complexity:<story_id>"  (one fire per high-complexity story)
+//   - count:      "count:<since>:<just_completed_id>"  (re-firing for the same
+//     post-completion state is the only crash-resume case to dedup)
+func checkpointKey(kind state.CheckpointTrigger, storyID string, since int) string {
+	switch kind {
+	case state.CheckpointComplexity:
+		return "complexity:" + storyID
+	case state.CheckpointCount:
+		return fmt.Sprintf("count:%d:%s", since, storyID)
+	}
+	return fmt.Sprintf("%s:%s", kind, storyID)
+}
+
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed")
 }
 
 func (s *StoryService) checkpointThreshold(ctx context.Context) int {

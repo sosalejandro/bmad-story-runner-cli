@@ -18,7 +18,7 @@ func NewStoriesStore(db *DB) *StoriesStore { return &StoriesStore{db: db} }
 const storiesSelectCols = `id, file, title, status, current_stage, parallel_group,
 		hydrated_file, resource_budget_ram_mb, resource_budget_cpu_cores,
 		requires_android, complexity, commit_hash, pr_url, ci_passed,
-		completed_at, created_at, updated_at`
+		completed_at, created_at, updated_at, claimed_at, claimed_by`
 
 func scanStory(row interface {
 	Scan(dest ...any) error
@@ -35,14 +35,19 @@ func scanStory(row interface {
 		prURL        sql.NullString
 		ciPassed     int
 		completedAt  sql.NullTime
+		claimedAt    sql.NullTime
+		claimedBy    sql.NullString
 	)
 	if err := row.Scan(
 		&s.ID, &s.File, &s.Title, &s.Status, &currentStage, &parallelGrp,
 		&hydrated, &ramMB, &cpuCores, &requires, &s.Complexity, &commitHash,
 		&prURL, &ciPassed, &completedAt, &s.CreatedAt, &s.UpdatedAt,
+		&claimedAt, &claimedBy,
 	); err != nil {
 		return state.Story{}, err
 	}
+	s.ClaimedAt = ptrTime(claimedAt)
+	s.ClaimedBy = ptrString(claimedBy)
 
 	if currentStage.Valid {
 		stage := state.Stage(currentStage.String)
@@ -272,4 +277,99 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// ClaimUnclaimedPending picks up to `max` candidates whose status=pending AND
+// claimed_at IS NULL AND id IN (eligibleIDs), atomically marks them claimed,
+// and returns the freshly-claimed rows. Single write transaction ensures two
+// concurrent callers can never both claim the same story.
+func (s *StoriesStore) ClaimUnclaimedPending(
+	ctx context.Context, eligibleIDs []string, max int, claimedBy string,
+) ([]state.Story, error) {
+	if max <= 0 || len(eligibleIDs) == 0 {
+		return nil, nil
+	}
+
+	tx, err := s.db.sqlDB().BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("stories claim begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Pick candidates from the eligible set: unclaimed + pending.
+	placeholders := strings.Repeat("?,", len(eligibleIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, len(eligibleIDs)+2)
+	for _, id := range eligibleIDs {
+		args = append(args, id)
+	}
+	args = append(args, string(state.StatusPending), max)
+	query := `SELECT id FROM stories
+	          WHERE id IN (` + placeholders + `)
+	            AND status = ?
+	            AND claimed_at IS NULL
+	          ORDER BY id LIMIT ?`
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("stories claim pick: %w", err)
+	}
+	var pickedIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("stories claim scan: %w", err)
+		}
+		pickedIDs = append(pickedIDs, id)
+	}
+	_ = rows.Close()
+	if len(pickedIDs) == 0 {
+		_ = tx.Commit()
+		return nil, nil
+	}
+
+	// Mark the picked rows claimed in the same transaction.
+	updateArgs := make([]any, 0, len(pickedIDs)+1)
+	updateArgs = append(updateArgs, claimedBy)
+	for _, id := range pickedIDs {
+		updateArgs = append(updateArgs, id)
+	}
+	updatePlaceholders := strings.Repeat("?,", len(pickedIDs))
+	updatePlaceholders = updatePlaceholders[:len(updatePlaceholders)-1]
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE stories
+		   SET claimed_at = CURRENT_TIMESTAMP, claimed_by = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id IN (`+updatePlaceholders+`)
+		   AND claimed_at IS NULL
+	`, updateArgs...); err != nil {
+		return nil, fmt.Errorf("stories claim update: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("stories claim commit: %w", err)
+	}
+
+	// Hydrate the rows in a fresh read (post-commit) so callers see the
+	// claimed_at timestamps.
+	out := make([]state.Story, 0, len(pickedIDs))
+	for _, id := range pickedIDs {
+		st, err := s.Get(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("stories claim re-read %q: %w", id, err)
+		}
+		out = append(out, st)
+	}
+	return out, nil
+}
+
+// ReleaseClaim clears claimed_at + claimed_by. Idempotent — clearing an
+// already-clear row is not an error.
+func (s *StoriesStore) ReleaseClaim(ctx context.Context, id string) error {
+	_, err := s.db.sqlDB().ExecContext(ctx,
+		`UPDATE stories SET claimed_at = NULL, claimed_by = NULL,
+		                    updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("stories release-claim %q: %w", id, err)
+	}
+	return nil
 }

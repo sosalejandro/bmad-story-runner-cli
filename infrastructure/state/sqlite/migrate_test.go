@@ -79,6 +79,22 @@ func TestMigrate_IsIdempotent(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "idempotent.db")
 
+	// First open establishes the baseline row count (one per shipped migration).
+	first, err := sqlite.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	_ = first.Close()
+	raw := openRawForInspection(t, path)
+	var baseline int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM schema_version`).Scan(&baseline); err != nil {
+		t.Fatalf("count baseline: %v", err)
+	}
+	if baseline < 1 {
+		t.Fatalf("baseline schema_version row count = %d, want >= 1", baseline)
+	}
+
+	// Reopening must NOT add more rows — that's the idempotency contract.
 	for i := 0; i < 3; i++ {
 		db, err := sqlite.Open(context.Background(), path)
 		if err != nil {
@@ -88,13 +104,11 @@ func TestMigrate_IsIdempotent(t *testing.T) {
 			t.Fatalf("Close iteration %d: %v", i, err)
 		}
 	}
-
-	raw := openRawForInspection(t, path)
-	var rowCount int
-	if err := raw.QueryRow(`SELECT COUNT(*) FROM schema_version`).Scan(&rowCount); err != nil {
-		t.Fatalf("count schema_version: %v", err)
+	var after int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM schema_version`).Scan(&after); err != nil {
+		t.Fatalf("count after re-opens: %v", err)
 	}
-	if rowCount != 1 {
-		t.Fatalf("schema_version row count after 3 opens = %d, want 1", rowCount)
+	if after != baseline {
+		t.Fatalf("schema_version row count = %d after re-opens, want %d (baseline)", after, baseline)
 	}
 }

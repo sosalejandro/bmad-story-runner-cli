@@ -42,14 +42,12 @@ func newRenderCmd() *cobra.Command {
 			}
 
 			data := map[string]any{}
+			if k, _ := c.Flags().GetString("idempotency-key"); k != "" {
+				data["IdempotencyKey"] = k
+			}
 
-			// Layer 4 (zero-defaults): pre-seed every optional slot the named
-			// template might dereference. The renderer runs in
-			// missingkey=error strict mode, which is great for catching
-			// required-slot bugs but trips on `{{if .Optional}}` when the
-			// map literally has no Optional key. Seeding with typed-nil /
-			// zero-value lets the template's if-checks evaluate correctly.
-			seedOptionalSlots(args[0], data)
+			// Optional-slot zero-defaults are seeded inside Render() itself
+			// (single source of truth at the library layer).
 
 			// Layer 3: config defaults.
 			if needsConfigDefaults(args[0]) {
@@ -103,6 +101,7 @@ func newRenderCmd() *cobra.Command {
 	cmd.Flags().IntVar(&attempt, "attempt", 1, "attempt number (used by retry_context)")
 	cmd.Flags().StringVar(&mode, "mode", "", "mode override (defaults to config.mode)")
 	cmd.Flags().StringVar(&outPath, "out", "", "write to file instead of stdout")
+	cmd.Flags().String("idempotency-key", "", "idempotency key from `dispatch begin` — injected into the rendered prompt so the L3 agent echoes it back")
 	addV6PersistentFlags(cmd)
 	return cmd
 }
@@ -113,23 +112,6 @@ func needsConfigDefaults(template string) bool {
 		return true
 	}
 	return false
-}
-
-// seedOptionalSlots pre-populates the named template's optional slots with
-// typed nil / zero values so `{{if .Optional}}` evaluates cleanly under
-// missingkey=error. The renderer still enforces presence of REQUIRED slots —
-// that surface is preserved; this only addresses the "tested-but-not-set"
-// optional pattern.
-func seedOptionalSlots(template string, data map[string]any) {
-	switch template {
-	case "stage_implement":
-		if _, ok := data["PriorAttempt"]; !ok {
-			data["PriorAttempt"] = (*struct{})(nil)
-		}
-		if _, ok := data["EpicContext"]; !ok {
-			data["EpicContext"] = ""
-		}
-	}
 }
 
 func layerConfigDefaults(ctx context.Context, data map[string]any, modeFlag string) error {

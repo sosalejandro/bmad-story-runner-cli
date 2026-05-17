@@ -17,9 +17,10 @@ func NewCheckpointsStore(db *DB) *CheckpointsStore { return &CheckpointsStore{db
 
 func (s *CheckpointsStore) Fire(ctx context.Context, c state.Checkpoint) (int64, error) {
 	res, err := s.db.sqlDB().ExecContext(ctx, `
-		INSERT INTO checkpoints (trigger_kind, trigger_detail, stories_since_last, summary_json)
-		VALUES (?, ?, ?, ?)
-	`, string(c.TriggerKind), nullString(c.TriggerDetail), c.StoriesSinceLast, c.SummaryJSON)
+		INSERT INTO checkpoints (trigger_kind, trigger_detail, stories_since_last, summary_json, idempotency_key)
+		VALUES (?, ?, ?, ?, ?)
+	`, string(c.TriggerKind), nullString(c.TriggerDetail), c.StoriesSinceLast,
+		c.SummaryJSON, nullString(c.IdempotencyKey))
 	if err != nil {
 		return 0, fmt.Errorf("checkpoints fire: %w", err)
 	}
@@ -34,14 +35,16 @@ func scanCheckpoint(row interface {
 	var triggerDetail sql.NullString
 	var userDecision sql.NullString
 	var decidedAt sql.NullTime
+	var idemKey sql.NullString
 	if err := row.Scan(
 		&c.ID, &c.TriggeredAt, &c.TriggerKind, &triggerDetail,
-		&c.StoriesSinceLast, &userDecision, &decidedAt, &c.SummaryJSON,
+		&c.StoriesSinceLast, &userDecision, &decidedAt, &c.SummaryJSON, &idemKey,
 	); err != nil {
 		return state.Checkpoint{}, err
 	}
 	c.TriggerDetail = ptrString(triggerDetail)
 	c.DecidedAt = ptrTime(decidedAt)
+	c.IdempotencyKey = ptrString(idemKey)
 	if userDecision.Valid {
 		d := state.CheckpointDecision(userDecision.String)
 		c.UserDecision = &d
@@ -50,7 +53,7 @@ func scanCheckpoint(row interface {
 }
 
 const checkpointCols = `id, triggered_at, trigger_kind, trigger_detail,
-		stories_since_last, user_decision, decided_at, summary_json`
+		stories_since_last, user_decision, decided_at, summary_json, idempotency_key`
 
 func (s *CheckpointsStore) Get(ctx context.Context, id int64) (state.Checkpoint, error) {
 	row := s.db.sqlDB().QueryRowContext(ctx,
