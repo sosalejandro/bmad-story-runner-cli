@@ -850,21 +850,72 @@ ADD:
 
 ## 7. Per-repo config schema
 
-See §3 `.bmad-test-env.yml` schema. Plus per-story frontmatter additions:
+Three layers of configuration, each with one source of truth:
+
+| Layer                  | Source of truth                | Format                       | Mutable via                  |
+| ---------------------- | ------------------------------ | ---------------------------- | ---------------------------- |
+| Runtime knobs          | `config` table (SQLite)        | key/value rows               | `bmad config <key> <value>`  |
+| Test-env topology      | `.bmad-test-env.yml` (per repo)| YAML (see §3)                | hand-edit, committed         |
+| Per-story metadata     | `epics.md` story frontmatter   | YAML inside markdown         | hand-edit, committed         |
+
+### Runtime config keys (`config` table)
+
+Seeded by `bmad init` with defaults; mutable via `bmad config <key> [<value>]`.
+
+| Key                                | Default     | Range / Notes                                         |
+| ---------------------------------- | ----------- | ----------------------------------------------------- |
+| `docs_folder`                      | (required)  | absolute path; set on init                            |
+| `mode`                             | `pragmatic` | `pragmatic` \| `strict`                               |
+| `max_parallel`                     | `4`         | hard cap; effective cap = min(this, system-check)     |
+| `reserve_ram_mb`                   | `8000`      | RAM held back from parallel budget for user dev work  |
+| `pr_strategy`                      | `per-story` | `per-story` \| `batch` \| `end-only`                  |
+| `batch_size`                       | `3`         | only used when `pr_strategy = batch`                  |
+| `max_tdd_cycles`                   | `3`         | retry budget for `implement` stage                    |
+| `max_qa_cycles`                    | `3`         | re-dispatch budget triggered by `test-review`         |
+| `max_ci_retries`                   | `2`         | retry budget for `commit / CI` stage                  |
+| `max_review_iterations`            | `3` strict / `1` pragmatic | code-review iterate-till-clean budget |
+| `checkpoint.count_threshold`       | `4`         | §12.5 count trigger — stories since last checkpoint   |
+| `env.stale_threshold_minutes`      | `120`       | §12.6 activity-based stale detection window           |
+
+Read examples:
+
+```bash
+bmad config mode                              # → pragmatic
+bmad config max_parallel                      # → 4
+bmad config checkpoint.count_threshold        # → 4
+bmad config env.stale_threshold_minutes       # → 120
+```
+
+Write examples:
+
+```bash
+bmad config mode strict
+bmad config max_parallel 2
+bmad config checkpoint.count_threshold 6
+bmad config env.stale_threshold_minutes 60    # tighten for short workloads
+```
+
+### Test-env topology
+
+See §3 `.bmad-test-env.yml` schema (per-repo, hand-edited, committed). Per-stack default budgets there; per-story override via story frontmatter `resource_budget` below.
+
+### Per-story frontmatter (in `epics.md` story sections)
 
 ```yaml
-# In a story's frontmatter (within epics.md story sections)
 ---
 story_id: "4.1"
-depends_on: ["3.1", "3.2"]  # other story IDs (or empty)
-affects:                     # files this story touches (for file-overlap detection)
+depends_on: ["3.1", "3.2"]   # other story IDs (or empty); written to story_dependencies
+affects:                      # files this story touches; written to story_affects
   - src/contexts/identity/
-resource_budget:
+resource_budget:              # overrides default_resource_budget_by_stack from .bmad-test-env.yml
   ram_mb: 800
   cpu_cores: 0.6
-requires_android: false      # per #338 mobile flag
+requires_android: false       # per #338 mobile flag
+complexity: medium            # low | medium | high  — §12.5 high-complexity fires checkpoint trigger
 ---
 ```
+
+`bmad init` and `bmad sprint plan` parse this frontmatter and write to `stories`, `story_dependencies`, `story_affects` tables. Story-level fields override per-repo defaults; missing fields fall back to defaults from `.bmad-test-env.yml`.
 
 ## 8. Migration path V4 → V6
 
