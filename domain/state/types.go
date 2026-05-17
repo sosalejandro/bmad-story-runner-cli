@@ -5,9 +5,239 @@ package state
 
 import "time"
 
+// ---------- Config ----------
+
 // ConfigEntry is a single row in the runtime-knobs config table.
 type ConfigEntry struct {
 	Key       string
 	Value     string
 	UpdatedAt time.Time
+}
+
+// ---------- Story enums ----------
+
+// Status is the high-level state of a story.
+type Status string
+
+const (
+	StatusPending    Status = "pending"
+	StatusHydrating  Status = "hydrating"
+	StatusInProgress Status = "in-progress"
+	StatusReviewing  Status = "reviewing"
+	StatusCommitting Status = "committing"
+	StatusEnvUp      Status = "env-up"
+	StatusEnvDown    Status = "env-down"
+	StatusComplete   Status = "complete"
+	StatusBlocked    Status = "blocked"
+)
+
+// Stage is the per-story pipeline stage (which L3 agent is next).
+type Stage string
+
+const (
+	StageHydrate    Stage = "hydrate"
+	StageATDD       Stage = "atdd"
+	StageImplement  Stage = "implement"
+	StageAutomate   Stage = "automate"
+	StageTestReview Stage = "test-review"
+	StageCodeReview Stage = "code-review"
+	StageCommit     Stage = "commit"
+	StageFinish     Stage = "finish"
+	StageDone       Stage = "done"
+)
+
+// Complexity drives the §12.5 checkpoint trigger.
+type Complexity string
+
+const (
+	ComplexityLow    Complexity = "low"
+	ComplexityMedium Complexity = "medium"
+	ComplexityHigh   Complexity = "high"
+)
+
+// ResourceBudget is the per-story RAM + CPU envelope used by sprint-planning
+// and system-check for parallel-batch sanity.
+type ResourceBudget struct {
+	RamMB    int
+	CPUCores float64
+}
+
+// Story mirrors the stories table. Nullable columns are pointer-typed so the
+// difference between "unset" and "zero value" is preserved across round-trips.
+type Story struct {
+	ID                string
+	File              string
+	Title             string
+	Status            Status
+	CurrentStage      *Stage
+	ParallelGroup     *int
+	HydratedFile      *string
+	ResourceBudget    *ResourceBudget
+	RequiresAndroid   bool
+	Complexity        Complexity
+	CommitHash        *string
+	PRURL             *string
+	CIPassed          bool
+	CompletedAt       *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+// Concern is one row in story_concerns.
+type Concern struct {
+	ID         int64
+	StoryID    string
+	AppendedAt time.Time
+	Source     string
+	BodyJSON   string
+}
+
+// RetryCounts is the per-story retry budget tracker (story_retry_counts).
+type RetryCounts struct {
+	StoryID          string
+	TDDCycles        int
+	QACycles         int
+	CIRetries        int
+	ReviewIterations int
+}
+
+// ---------- Batches ----------
+
+// BatchStatus tracks where a planned batch is in its lifecycle.
+type BatchStatus string
+
+const (
+	BatchPlanned  BatchStatus = "planned"
+	BatchInFlight BatchStatus = "in-flight"
+	BatchComplete BatchStatus = "complete"
+)
+
+// Batch mirrors the batches table; StoryIDs are loaded eagerly from batch_stories.
+type Batch struct {
+	ID          int64
+	SequenceNo  int
+	Status      BatchStatus
+	StoryIDs    []string
+	CreatedAt   time.Time
+	StartedAt   *time.Time
+	CompletedAt *time.Time
+}
+
+// ---------- Worktrees ----------
+
+// Worktree mirrors the worktrees table.
+type Worktree struct {
+	StoryID        string
+	Path           string
+	BranchName     string
+	CreatedAt      time.Time
+	LastActivityAt *time.Time
+}
+
+// ---------- Env allocations ----------
+
+// EnvAllocation mirrors env_allocations. ReclaimedAt is nil while the env is live.
+type EnvAllocation struct {
+	StoryID       string
+	PGPort        int
+	RedisPort     int
+	OtelPort      *int
+	DBName        string
+	ContainerIDs  []string
+	CreatedAt     time.Time
+	ReclaimedAt   *time.Time
+	ReclaimReason *string
+}
+
+// ---------- Dispatches ----------
+
+// DispatchStatus is the return-status of one L3 invocation.
+type DispatchStatus string
+
+const (
+	DispatchOK      DispatchStatus = "ok"
+	DispatchBlocked DispatchStatus = "blocked"
+	DispatchErrored DispatchStatus = "errored"
+)
+
+// TokenCounts carries the four token-usage axes returned by the agent API.
+type TokenCounts struct {
+	Input       int64
+	Output      int64
+	CacheRead   int64
+	CacheCreate int64
+}
+
+// Dispatch mirrors one row in dispatches (§12.7 token-cost tracking).
+type Dispatch struct {
+	ID           int64
+	StoryID      string
+	Stage        Stage
+	AgentRole    string
+	AttemptNo    int
+	Status       DispatchStatus
+	Reason       *string
+	Tokens       TokenCounts
+	Model        *string
+	DurationMS   int64
+	DispatchedAt time.Time
+	ReturnedAt   *time.Time
+}
+
+// ---------- Checkpoints ----------
+
+// CheckpointTrigger identifies which §12.5 trigger fired the checkpoint.
+type CheckpointTrigger string
+
+const (
+	CheckpointCount      CheckpointTrigger = "count"
+	CheckpointComplexity CheckpointTrigger = "complexity"
+)
+
+// CheckpointDecision is the user's verdict on a fired checkpoint.
+type CheckpointDecision string
+
+const (
+	DecisionContinue CheckpointDecision = "continue"
+	DecisionAdjust   CheckpointDecision = "adjust"
+	DecisionHalt     CheckpointDecision = "halt"
+)
+
+// Checkpoint mirrors the checkpoints table.
+type Checkpoint struct {
+	ID               int64
+	TriggeredAt      time.Time
+	TriggerKind      CheckpointTrigger
+	TriggerDetail    *string
+	StoriesSinceLast int
+	UserDecision     *CheckpointDecision
+	DecidedAt        *time.Time
+	SummaryJSON      string
+}
+
+// ---------- Depguard ----------
+
+// DepguardState is the per-rule severity (warn or error).
+type DepguardState string
+
+const (
+	DepguardWarn  DepguardState = "warn"
+	DepguardError DepguardState = "error"
+)
+
+// DepguardFlip mirrors one row in depguard_flips (current state).
+type DepguardFlip struct {
+	Rule      string
+	State     DepguardState
+	FlippedAt time.Time
+}
+
+// DepguardFlipEvent is one row in depguard_flip_history (audit log).
+type DepguardFlipEvent struct {
+	ID        int64
+	Rule      string
+	From      DepguardState
+	To        DepguardState
+	FlippedAt time.Time
+	Reason    *string
 }
