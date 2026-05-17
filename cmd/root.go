@@ -48,6 +48,7 @@ so Claude does not need to write inline Python or bash scripts.`,
 		newDispatchCmd(),   // v6 — dispatch record (§12.7 token cost)
 		newRenderCmd(),     // v6 — prompt template render
 		newSystemCheckCmd(), // v6 — host resource probe
+		newSprintCmd(),     // v6 — sprint namespace (plan/run/pause/resume/status)
 		newStatusCmd(),
 		newSetStatusCmd(),
 		newSetCompleteCmd(),
