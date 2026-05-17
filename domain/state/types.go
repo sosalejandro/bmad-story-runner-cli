@@ -55,6 +55,22 @@ const (
 	ComplexityHigh   Complexity = "high"
 )
 
+// StoryType drives the stage-applicability matrix — which stages must
+// dispatch and which auto-skip as not-applicable for this story's nature.
+//
+//   - code:  full pipeline (hydrate + atdd + implement + automate +
+//            test-review + code-review + commit)
+//   - doc:   skip atdd / automate / test-review (no runtime behavior to test)
+//   - mixed: full pipeline (treats like code; if subagents return blocked-NA
+//            for portions, surface to user)
+type StoryType string
+
+const (
+	StoryTypeCode  StoryType = "code"
+	StoryTypeDoc   StoryType = "doc"
+	StoryTypeMixed StoryType = "mixed"
+)
+
 // ResourceBudget is the per-story RAM + CPU envelope used by sprint-planning
 // and system-check for parallel-batch sanity.
 type ResourceBudget struct {
@@ -75,6 +91,7 @@ type Story struct {
 	ResourceBudget    *ResourceBudget
 	RequiresAndroid   bool
 	Complexity        Complexity
+	StoryType         StoryType
 	CommitHash        *string
 	PRURL             *string
 	CIPassed          bool

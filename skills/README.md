@@ -29,6 +29,23 @@ After install, Claude Code auto-discovers them at session start.
 | `story-checkpoint`    | sprint-level | `bmad story checkpoint <id>` (dual-trigger §12.5)             |
 | `context-propagation` | sprint-level | post-completion downstream-drift scan; surfaces re-hydrate signals |
 
+## Story type → stage applicability (the matrix)
+
+Epics.md frontmatter declares `story_type: doc | code | mixed` (default
+`code`). The orchestrator queries `bmad story applicable-stages <id>
+--mode <m>` to get the actual list of stages to dispatch — non-applicable
+stages auto-skip with a pre-recorded blocked-NA dispatch row.
+
+| story_type / mode | pragmatic                              | strict                                                                  |
+| ----------------- | -------------------------------------- | ----------------------------------------------------------------------- |
+| code              | hydrate → implement → code-review → commit | hydrate → atdd → implement → automate → test-review → code-review → commit |
+| doc               | hydrate → implement → code-review → commit | hydrate → implement → code-review → commit (atdd / automate / test-review skipped) |
+| mixed             | hydrate → implement → code-review → commit | hydrate → atdd → implement → automate → test-review → code-review → commit |
+
+Doc stories also skip `env up / env down` — no test infra needed for
+markdown-only work. Saves ~30-100k subagent tokens per doc story (atdd
+no longer dispatched to discover it's N/A; automate + test-review same).
+
 The four infra skills are the §12.4 SRP split of the proposed
 `test-env-isolation` skill — each owns one concern, composes via the
 orchestrator (or higher-level `bmad env up`).

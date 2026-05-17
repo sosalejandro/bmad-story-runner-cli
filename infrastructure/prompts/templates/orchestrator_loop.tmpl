@@ -57,35 +57,54 @@ loop:
     break loop           # else: queue exhausted for this session.
 
   story_id=picked.actions[0].story_id
-  stage=picked.actions[0].stage
 
-  # 3. Per-story try/finally — env up + worktree, then guaranteed teardown.
+  # 3. Determine which stages apply (story_type × mode matrix).
+  #    Stages NOT in this list are auto-skipped — pre-record as
+  #    blocked-NA to save the subagent token spend of discovering NA
+  #    at runtime.
+  plan=$(bmad story applicable-stages $story_id --mode {{.Mode}})
+  applicable=$(echo $plan | jq -r '.applicable[]')   # e.g. hydrate implement code-review commit
+  skipped=$(echo $plan | jq -r '.skipped[]')          # may be empty
+
+  # 3a. Pre-record skipped stages so the dispatches table has a complete
+  #     trail and downstream queries (in-flight, audit) stay clean.
+  for stage in $skipped:
+    k=$(bmad dispatch begin $story_id $stage | jq -r .idempotency_key)
+    bmad dispatch record --key "$k" --status blocked \
+      --reason "stage_not_applicable_for_story_type"
+
+  # 4. Per-story try/finally — env up + worktree, then guaranteed teardown.
   try:
-    # 3a. Bring up isolated test infra (via port-pool + docker-up + healthcheck skills).
-    bmad env up $story_id
+    # 4a. Bring up isolated test infra (via port-pool + docker-up + healthcheck skills).
+    #     Skip env-up entirely for doc stories — no infra needed.
+    if plan.story_type != "doc":
+      bmad env up $story_id
 
-    # 3b. Generate idempotency key + pre-record the dispatch.
-    key=$(bmad dispatch begin $story_id $stage | jq -r .idempotency_key)
+    # 4b. Iterate the applicable stages in order, dispatching each.
+    for stage in $applicable:
+      # i. Generate idempotency key + pre-record the dispatch.
+      key=$(bmad dispatch begin $story_id $stage | jq -r .idempotency_key)
 
-    # 3c. Render the stage's prompt (auto-pulls latest story/epic context).
-    prompt=$(bmad render stage_$stage --story $story_id --env-story $story_id \
-             --mode {{.Mode}} --idempotency-key "$key")
+      # ii. Render the stage's prompt (auto-pulls latest story/epic context).
+      prompt=$(bmad render stage_$stage --story $story_id --env-story $story_id \
+               --mode {{.Mode}} --idempotency-key "$key")
 
-    # 3d. Dispatch the L3 agent. This is the only place Task() is invoked.
-    result=$(Task({ subagent_type: <agent_for_stage>, prompt: $prompt }))
+      # iii. Dispatch the L3 agent. This is the only place Task() is invoked.
+      result=$(Task({ subagent_type: <agent_for_stage>, prompt: $prompt }))
 
-    # 3e. Close out the dispatch row.
-    bmad dispatch record --key "$key" --status <result.status> \
-      --input-tokens N --output-tokens N --duration-ms N
+      # iv. Close out the dispatch row.
+      bmad dispatch record --key "$key" --status <result.status> \
+        --input-tokens N --output-tokens N --duration-ms N
 
-    # 3f. Advance state — either next stage, or complete on terminal stages.
-    if result.status == "ok" and stage == "commit":
-      bmad story complete $story_id --commit <hash> --pr <url>
-    else:
-      bmad story set-status $story_id <next-status>
+      # v. If status=blocked + budget remains → re-dispatch this stage;
+      #    else if exhausted → break + go to finally.
+
+    # 4c. Story-complete (last applicable stage was commit / final).
+    bmad story complete $story_id --commit <hash> --pr <url>
 
   finally:
-    bmad env down $story_id --reason <completed|stale|manual>
+    if plan.story_type != "doc":
+      bmad env down $story_id --reason <completed|stale|manual>
 
   # 4. After every completion, check if downstream stories need adjustment.
   invoke skill: context-propagation --just-completed $story_id

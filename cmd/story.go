@@ -29,6 +29,8 @@ func newStoryCmd() *cobra.Command {
 		newStoryCheckpointCmd(),
 		newStorySetStatusCmd(),
 		newStoryCompleteCmd(),
+		newStoryApplicableStagesCmd(),
+		newStorySetTypeCmd(),
 	)
 	addV6PersistentFlags(cmd)
 	return cmd
@@ -374,4 +376,107 @@ func effectiveMaxParallel(v string) int {
 		return 4
 	}
 	return n
+}
+
+// ---------- applicable-stages ----------
+
+func newStoryApplicableStagesCmd() *cobra.Command {
+	var mode string
+	cmd := &cobra.Command{
+		Use:   "applicable-stages <story-id>",
+		Short: "Emit the ordered list of stages the orchestrator must dispatch for this story",
+		Long: `Per (story_type × mode), returns:
+
+  - applicable: stages the orchestrator dispatches L3 agents for
+  - skipped:    stages auto-skipped (pre-record as blocked-NA)
+
+Use in the orchestrator loop in place of the hardcoded
+hydrate→atdd→…→commit list. Saves the subagent token spend of
+discovering "this stage is N/A for this story" at runtime.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			ctx := context.Background()
+			svc, cleanup, err := openStoryService(ctx)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			st, err := svc.Stories.Get(ctx, args[0])
+			if errors.Is(err, state.ErrNotFound) {
+				fmt.Fprintf(os.Stderr, "story %q not found\n", args[0])
+				os.Exit(1)
+			}
+			if err != nil {
+				return err
+			}
+
+			effectiveMode := appstate.Mode(mode)
+			if effectiveMode == "" {
+				if v, err := svc.Config.Get(ctx, "mode"); err == nil {
+					effectiveMode = appstate.Mode(v)
+				} else {
+					effectiveMode = appstate.ModePragmatic
+				}
+			}
+
+			applicable := appstate.ApplicableStages(st.StoryType, effectiveMode)
+			skipped := appstate.SkippedStages(st.StoryType, effectiveMode)
+
+			applicableStrs := make([]string, 0, len(applicable))
+			for _, s := range applicable {
+				applicableStrs = append(applicableStrs, string(s))
+			}
+			skippedStrs := make([]string, 0, len(skipped))
+			for _, s := range skipped {
+				skippedStrs = append(skippedStrs, string(s))
+			}
+
+			return json.NewEncoder(os.Stdout).Encode(map[string]any{
+				"story_id":   st.ID,
+				"story_type": string(st.StoryType),
+				"mode":       string(effectiveMode),
+				"applicable": applicableStrs,
+				"skipped":    skippedStrs,
+			})
+		},
+	}
+	cmd.Flags().StringVar(&mode, "mode", "", "override mode (default: from config.mode)")
+	return cmd
+}
+
+// ---------- set-type ----------
+
+func newStorySetTypeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "set-type <story-id> <code|doc|mixed>",
+		Short: "Override a story's story_type (drives stage-applicability matrix)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(c *cobra.Command, args []string) error {
+			ctx := context.Background()
+			svc, cleanup, err := openStoryService(ctx)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			id := args[0]
+			storyType := state.StoryType(args[1])
+			if storyType != state.StoryTypeCode &&
+				storyType != state.StoryTypeDoc &&
+				storyType != state.StoryTypeMixed {
+				return fmt.Errorf("invalid story_type %q (want code|doc|mixed)", args[1])
+			}
+			st, err := svc.Stories.Get(ctx, id)
+			if err != nil {
+				return err
+			}
+			st.StoryType = storyType
+			if err := svc.Stories.Update(ctx, st); err != nil {
+				return err
+			}
+			fmt.Printf("%s story_type -> %s\n", id, storyType)
+			return nil
+		},
+	}
 }

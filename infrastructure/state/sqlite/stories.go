@@ -18,7 +18,7 @@ func NewStoriesStore(db *DB) *StoriesStore { return &StoriesStore{db: db} }
 const storiesSelectCols = `id, file, title, status, current_stage, parallel_group,
 		hydrated_file, resource_budget_ram_mb, resource_budget_cpu_cores,
 		requires_android, complexity, commit_hash, pr_url, ci_passed,
-		completed_at, created_at, updated_at, claimed_at, claimed_by`
+		completed_at, created_at, updated_at, claimed_at, claimed_by, story_type`
 
 func scanStory(row interface {
 	Scan(dest ...any) error
@@ -42,7 +42,7 @@ func scanStory(row interface {
 		&s.ID, &s.File, &s.Title, &s.Status, &currentStage, &parallelGrp,
 		&hydrated, &ramMB, &cpuCores, &requires, &s.Complexity, &commitHash,
 		&prURL, &ciPassed, &completedAt, &s.CreatedAt, &s.UpdatedAt,
-		&claimedAt, &claimedBy,
+		&claimedAt, &claimedBy, &s.StoryType,
 	); err != nil {
 		return state.Story{}, err
 	}
@@ -163,13 +163,18 @@ func (s *StoriesStore) Insert(ctx context.Context, st state.Story) error {
 	if complexity == "" {
 		complexity = state.ComplexityMedium
 	}
+	storyType := st.StoryType
+	if storyType == "" {
+		storyType = state.StoryTypeCode
+	}
 
 	_, err := s.db.sqlDB().ExecContext(ctx, `
 		INSERT INTO stories (
 			id, file, title, status, current_stage, parallel_group,
 			hydrated_file, resource_budget_ram_mb, resource_budget_cpu_cores,
-			requires_android, complexity, commit_hash, pr_url, ci_passed, completed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			requires_android, complexity, commit_hash, pr_url, ci_passed,
+			completed_at, story_type
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		st.ID, st.File, st.Title, string(st.Status),
 		stage, nullInt(st.ParallelGroup),
@@ -177,6 +182,7 @@ func (s *StoriesStore) Insert(ctx context.Context, st state.Story) error {
 		boolToInt(st.RequiresAndroid), string(complexity),
 		nullString(st.CommitHash), nullString(st.PRURL),
 		boolToInt(st.CIPassed), nullTime(st.CompletedAt),
+		string(storyType),
 	)
 	if err != nil {
 		return fmt.Errorf("stories insert %q: %w", st.ID, err)
@@ -199,18 +205,23 @@ func (s *StoriesStore) Update(ctx context.Context, st state.Story) error {
 		cpu = sql.NullFloat64{Float64: st.ResourceBudget.CPUCores, Valid: true}
 	}
 
+	storyType := st.StoryType
+	if storyType == "" {
+		storyType = state.StoryTypeCode
+	}
 	res, err := s.db.sqlDB().ExecContext(ctx, `
 		UPDATE stories SET
 			file = ?, title = ?, status = ?, current_stage = ?, parallel_group = ?,
 			hydrated_file = ?, resource_budget_ram_mb = ?, resource_budget_cpu_cores = ?,
 			requires_android = ?, complexity = ?, commit_hash = ?, pr_url = ?,
-			ci_passed = ?, completed_at = ?, updated_at = CURRENT_TIMESTAMP
+			ci_passed = ?, completed_at = ?, story_type = ?,
+			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`,
 		st.File, st.Title, string(st.Status), stage, nullInt(st.ParallelGroup),
 		hydrated, ramMB, cpu, boolToInt(st.RequiresAndroid), string(st.Complexity),
 		nullString(st.CommitHash), nullString(st.PRURL),
-		boolToInt(st.CIPassed), nullTime(st.CompletedAt), st.ID,
+		boolToInt(st.CIPassed), nullTime(st.CompletedAt), string(storyType), st.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("stories update %q: %w", st.ID, err)

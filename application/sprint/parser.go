@@ -27,6 +27,7 @@ type StoryFrontmatter struct {
 	} `yaml:"resource_budget"`
 	RequiresAndroid bool   `yaml:"requires_android"`
 	Complexity      string `yaml:"complexity"`
+	StoryType       string `yaml:"story_type"` // doc | code | mixed (default: code)
 }
 
 // ParsedStory carries the frontmatter + the file path it was sourced from.
@@ -154,6 +155,10 @@ func (p ParsedStory) ToStory() state.Story {
 	if complexity == "" {
 		complexity = state.ComplexityMedium
 	}
+	storyType := state.StoryType(p.Frontmatter.StoryType)
+	if storyType == "" {
+		storyType = state.StoryTypeCode
+	}
 	title := p.Frontmatter.Title
 	if title == "" {
 		title = p.StoryTitle
@@ -164,6 +169,7 @@ func (p ParsedStory) ToStory() state.Story {
 		Title:           title,
 		Status:          state.StatusPending,
 		Complexity:      complexity,
+		StoryType:       storyType,
 		RequiresAndroid: p.Frontmatter.RequiresAndroid,
 	}
 	if p.Frontmatter.ResourceBudget != nil {
