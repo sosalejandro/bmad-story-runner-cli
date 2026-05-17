@@ -1,0 +1,55 @@
+{{/* Slot contract:
+       .StoryID         (string)   required
+       .HydratedFile    (string)   required
+       .Mode            (string)   required (always "strict" for this stage)
+       .EnvConfig       (struct)   required
+       .PriorAttempt    (*struct)  optional
+       .IdempotencyKey  (string)   optional
+*/}}
+# Write Acceptance Tests for Story {{.StoryID}}
+
+You are the **atdd-writer** L3 agent (STRICT mode). Per your agent
+definition, generate failing acceptance tests for this story BEFORE
+implementation. Red-phase TDD.
+
+Hydrated spec: `{{.HydratedFile}}`
+
+## Test environment (already up)
+
+- Postgres :{{.EnvConfig.PgPort}} (db: `{{.EnvConfig.DbName}}`)
+- Redis :{{.EnvConfig.RedisPort}}
+{{if .EnvConfig.OtelPort -}}
+- OTEL :{{.EnvConfig.OtelPort}}
+{{- end}}
+
+{{if .PriorAttempt -}}
+## Prior attempt summary
+
+{{template "retry_context" .PriorAttempt}}
+{{- end}}
+
+## What to do
+
+Read the hydrated spec. Translate each `Given/When/Then` acceptance
+criterion into a failing test. Tests must:
+- Compile cleanly
+- Fail for the right reason (assert against unimplemented behavior)
+- Be runnable via `go test ./...` (or repo-equivalent)
+
+If the story's ACs are purely doc/verification (e.g., "the choice is
+documented in X"), surface that and emit `status: blocked` with a clear
+reason — the orchestrator will route accordingly. STRICT mode forces
+this stage; the agent decides if it applies.
+
+## Return JSON
+
+```json
+{
+  "story_id": "{{.StoryID}}",
+  "stage": "atdd",
+  "status": "ok|blocked|errored",
+  "reason": "...",
+  "tests_added": ["path/to/foo_test.go", "..."]{{if .IdempotencyKey}},
+  "idempotency_key": "{{.IdempotencyKey}}"{{end}}
+}
+```

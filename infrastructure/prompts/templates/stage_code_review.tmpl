@@ -1,0 +1,58 @@
+{{/* Slot contract:
+       .StoryID         (string)   required
+       .HydratedFile    (string)   required
+       .Mode            (string)   required — pragmatic | strict
+       .EnvConfig       (struct)   required
+       .Iteration       (int)      required — review iteration #; 1 for first pass
+       .MaxIterations   (int)      required — max_review_iterations from config
+       .PriorAttempt    (*struct)  optional
+       .IdempotencyKey  (string)   optional
+*/}}
+# Code Review for Story {{.StoryID}} (iteration {{.Iteration}} of {{.MaxIterations}})
+
+You are the **code-reviewer** L3 agent. Adversarial review of source
+code (not tests — test-reviewer handles those) per your agent definition.
+
+Hydrated spec: `{{.HydratedFile}}`
+Mode: **{{.Mode}}**
+{{if eq .Mode "strict" -}}
+STRICT: iterate till clean (this is iteration {{.Iteration}} of {{.MaxIterations}}).
+On blocking findings, the orchestrator dispatches tdd-implementer to
+address them, then re-dispatches you. After {{.MaxIterations}} iterations
+without convergence → story marked blocked.
+{{- else -}}
+PRAGMATIC: 1 round + advisory findings. Surface issues; do NOT block
+unless they're show-stoppers.
+{{- end}}
+
+## Test environment
+
+- Postgres :{{.EnvConfig.PgPort}} (db: `{{.EnvConfig.DbName}}`)
+
+{{if .PriorAttempt -}}
+## Prior attempt summary
+
+{{template "retry_context" .PriorAttempt}}
+{{- end}}
+
+## What to do
+
+Review the source code changes (NOT tests) per your agent definition.
+On {{if eq .Mode "strict"}}blocking{{else}}any{{end}} findings, emit
+`status: blocked` with a precise list. Otherwise `status: ok`.
+
+## Return JSON
+
+```json
+{
+  "story_id": "{{.StoryID}}",
+  "stage": "code-review",
+  "iteration": {{.Iteration}},
+  "status": "ok|blocked|errored",
+  "reason": "...",
+  "findings": [
+    {"severity": "blocking|advisory", "file": "path", "line": 0, "note": "..."}
+  ]{{if .IdempotencyKey}},
+  "idempotency_key": "{{.IdempotencyKey}}"{{end}}
+}
+```

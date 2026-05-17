@@ -54,7 +54,9 @@ func TestInit_IsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-init: %v", err)
 	}
-	// All defaults skipped second time around.
+	// All defaults skipped (re-init does not overwrite). The user-tuned `mode`
+	// key was already in DefaultConfig set, so still counted as "skipped"
+	// because it pre-existed — len(SkippedKeys) === len(DefaultConfig).
 	if len(res.SkippedKeys) != len(appstate.DefaultConfig) {
 		t.Fatalf("skipped = %d, want %d (all defaults)", len(res.SkippedKeys), len(appstate.DefaultConfig))
 	}

@@ -108,15 +108,28 @@ any hydrated specs.
 
 - If `downstream_check` is empty → orchestrator continues to next story
   with no interruption.
-- If non-empty → emit the report to the orchestrator's stdout. The
-  orchestrator either:
-    a. Acts on `re-hydrate` signals automatically if --auto-rehydrate
-       is set in config (future)
-    b. Surfaces the report to the user and asks "re-hydrate Y? continue
-       without changes? halt sprint to manually adjust?"
+- If non-empty → check the auto-rehydrate config flag:
+
+  ```bash
+  auto=$(bmad config propagation.auto_rehydrate)
+  ```
+
+  - If `auto == "true"` → for each entry with `signal: re-hydrate`,
+    run `bmad story hydrate <story_id> --re-hydrate` automatically.
+    Entries with `signal: review` are still surfaced to the user
+    (re-hydrate is safe to auto-apply; "review" needs human judgment).
+  - If `auto != "true"` (the default) → emit the report to stdout and
+    pause for the user: "re-hydrate Y? continue without changes? halt
+    sprint to manually adjust?"
+
 - Either way, store the report in the latest checkpoint's summary_json
   if a checkpoint is also being fired — gives the user a single artifact
   to review.
+
+The auto-rehydrate default is `false` because re-hydrating during a sprint
+can re-shape downstream stories' hydrated specs in non-obvious ways. Turn
+it on only when you're confident the heuristic signals are reliable for
+your project (typically after dogfooding a few sprints).
 
 ## What this skill DOES NOT do
 

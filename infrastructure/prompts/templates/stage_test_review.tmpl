@@ -1,0 +1,55 @@
+{{/* Slot contract:
+       .StoryID         (string)   required
+       .HydratedFile    (string)   required
+       .Mode            (string)   required (always "strict" for this stage)
+       .EnvConfig       (struct)   required
+       .PriorAttempt    (*struct)  optional
+       .IdempotencyKey  (string)   optional
+*/}}
+# Review Tests for Story {{.StoryID}}
+
+You are the **test-reviewer** L3 agent (STRICT mode). Audit the test
+suite for this story on 8 quality dimensions per your agent definition:
+determinism, isolation, maintainability, readability, performance,
+naming, coverage, anti-patterns. Score 0-100.
+
+Hydrated spec: `{{.HydratedFile}}`
+
+## Test environment
+
+- Postgres :{{.EnvConfig.PgPort}} (db: `{{.EnvConfig.DbName}}`)
+- Redis :{{.EnvConfig.RedisPort}}
+{{if .EnvConfig.OtelPort -}}
+- OTEL :{{.EnvConfig.OtelPort}}
+{{- end}}
+
+{{if .PriorAttempt -}}
+## Prior attempt summary
+
+{{template "retry_context" .PriorAttempt}}
+{{- end}}
+
+## What to do
+
+Read the tests added by ATDD + test-automate for this story. Audit each
+dimension. If score < 80 OR any dimension has a blocking finding, emit
+`status: blocked` — the orchestrator will route back to test-automate
+or implement (per max_qa_cycles budget). Otherwise `status: ok`.
+
+## Return JSON
+
+```json
+{
+  "story_id": "{{.StoryID}}",
+  "stage": "test-review",
+  "status": "ok|blocked|errored",
+  "reason": "...",
+  "scores": {
+    "determinism": 0, "isolation": 0, "maintainability": 0,
+    "readability": 0, "performance": 0, "naming": 0,
+    "coverage": 0, "anti_patterns": 0
+  },
+  "blocking_findings": ["..."]{{if .IdempotencyKey}},
+  "idempotency_key": "{{.IdempotencyKey}}"{{end}}
+}
+```

@@ -9,6 +9,18 @@
 // Slot contract: each template's first comment block declares its
 // required slot names. The renderer runs in strict mode (missing fields
 // surface as errors at Execute time, not silently empty strings).
+//
+// # Why text/template and NOT html/template
+//
+// Rendered output is LLM prompt text that gets piped to a Claude Code
+// subagent via the Task tool — not HTML rendered in a browser. The
+// templates contain JSON examples (`{"key": "value"}`), comparison
+// operators in the prose (e.g. "score < 80"), and shell snippets — all
+// of which html/template would aggressively escape (`<` → `&lt;`,
+// `>` → `&gt;`, `&` → `&amp;`), corrupting the prompt the agent receives.
+// XSS isn't a threat surface here: there is no browser, no user-submitted
+// content being rendered for display, and all slot data is internal
+// (sqlite + config files + the orchestrator's own state).
 package prompts
 
 import (
@@ -17,6 +29,7 @@ import (
 	"fmt"
 	"io/fs"
 	"strings"
+	// nosemgrep
 	"text/template"
 )
 
@@ -97,11 +110,14 @@ func (r *Renderer) Render(name string, data any) (string, error) {
 //
 // Add a case here when a template introduces a new optional slot.
 func seedOptionalSlots(template string, data map[string]any) {
+	// All stage_* templates share the same two truly-optional slots.
+	if strings.HasPrefix(template, "stage_") {
+		setDefault(data, "PriorAttempt", (*struct{})(nil))
+		setDefault(data, "IdempotencyKey", "")
+	}
 	switch template {
 	case "stage_implement":
-		setDefault(data, "PriorAttempt", (*struct{})(nil))
 		setDefault(data, "EpicContext", "")
-		setDefault(data, "IdempotencyKey", "")
 	case "orchestrator_loop":
 		setDefault(data, "ClaimerID", "orchestrator")
 	}

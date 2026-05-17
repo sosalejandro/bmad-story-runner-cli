@@ -23,6 +23,7 @@ var DefaultConfig = map[string]string{
 	"max_review_iterations":         "3",
 	"checkpoint.count_threshold":    "4",
 	"env.stale_threshold_minutes":   "120",
+	"propagation.auto_rehydrate":    "false",
 }
 
 // InitUseCase seeds an empty v6 state store with default config rows.

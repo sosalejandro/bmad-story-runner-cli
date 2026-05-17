@@ -1,0 +1,50 @@
+{{/* Slot contract:
+       .StoryID         (string)   required
+       .Mode            (string)   required — pragmatic | strict
+       .EpicsPath       (string)   required — path to epics.md the story lives in
+       .ArchitecturePath (string)  required — path to the architecture doc
+       .HydratedFile    (string)   required — where the hydrated spec WILL be written
+       .PriorAttempt    (*struct)  optional
+       .IdempotencyKey  (string)   optional
+*/}}
+# Hydrate Story {{.StoryID}}
+
+You are the **story-hydrator** L3 agent. Take this lightweight story from
+`epics.md` and produce the full per-story implementation file at
+`{{.HydratedFile}}` per your agent definition's protocol.
+
+Mode: **{{.Mode}}**
+
+## Source inputs
+
+- Lightweight story: in `{{.EpicsPath}}` under `### Story {{.StoryID}}:`
+- Architecture canon: `{{.ArchitecturePath}}`
+- Companion artifacts (BC audit, saga mapping, Pattern Applicability Matrix):
+  in the same `docs/architecture/eda-cutover/` directory
+
+{{if .PriorAttempt -}}
+## Prior attempt summary
+
+{{template "retry_context" .PriorAttempt}}
+{{- end}}
+
+## What to do
+
+Follow your agent definition's hydration protocol. Write the hydrated
+file to `{{.HydratedFile}}` and DO NOT modify any other file.
+
+## Return JSON
+
+```json
+{
+  "story_id": "{{.StoryID}}",
+  "stage": "hydrate",
+  "status": "ok|blocked|errored",
+  "reason": "...",
+  "hydrated_file_path": "{{.HydratedFile}}",
+  "slice": "...",
+  "bc_target": "...",
+  "fr_refs": ["..."]{{if .IdempotencyKey}},
+  "idempotency_key": "{{.IdempotencyKey}}"{{end}}
+}
+```
