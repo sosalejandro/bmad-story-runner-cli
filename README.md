@@ -4,6 +4,40 @@
 
 `bmad` replaces ad-hoc Python/bash scripts with a single Go binary that tracks story progress, manages QA gates, resolves blockers, and coordinates parallel agent sessions — so your AI assistant spends tokens on code, not on reinventing progress management.
 
+---
+
+## V2 (BMad v6) — in-progress on the `v2` branch
+
+The `v2` branch ([spec](docs/spec-v6.md)) is the BMad-v6 generation of this CLI.
+The headline shift: state moves from `bmad-progress.json` (V1/V4) to a **SQLite
+store** at `bmad-state.db`, enabling N-parallel orchestration without
+read-modify-write races. Commands are organized into verb-namespaced subtrees:
+
+```
+bmad init                          # scaffold bmad-state.db + seed config
+bmad migrate --from <v4.json>      # one-shot V4 → V6 import (idempotent)
+bmad config <key> [<value>]        # runtime knobs (sqlite-backed)
+bmad system-check                  # free RAM + CPU load + max_safe_parallel
+bmad dispatch record ...           # §12.7 per-call token cost log
+bmad render <template>             # prompt template renderer
+
+bmad story    <status|hydrate|next|checkpoint|set-status|complete>
+bmad sprint   <plan|run|pause|resume|status>     # epics.md → batches → orchestration
+bmad env      <up|down|status|cleanup-orphans>   # port pool + activity sweeper
+bmad worktree <create|destroy|list|prune>        # state tracking; git is caller's job
+bmad depguard <flip|status|history>              # per-rule warn↔error ratchet
+bmad gate     <write|check>                      # PASS/FAIL/CONCERNS sqlite-backed
+```
+
+The orchestrator-agent runtime layer (Claude Code dispatch, infra Skills) is
+documented in [docs/spec-v6.md](docs/spec-v6.md); this CLI is the state +
+template + invocation layer that the orchestrator stitches.
+
+V4 commands continue to work in V1 mode against `bmad-progress.json` until
+explicitly migrated.
+
+---
+
 **Key features for AI-assisted developers:**
 - **Progress tracking** — `bmad-progress.json` as the single source of truth across agent sessions
 - **Blocker resolution** — prefix-aware dependency matching (`2.1` resolves blockers on `2.1.payment-api`)

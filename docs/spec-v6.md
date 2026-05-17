@@ -1118,4 +1118,14 @@ Build phase can start against this spec.
 - 2026-05-16 — original spec captured (seed commit `b606673`)
 - 2026-05-16 — §12 pressure-test decisions recorded (Q1-Q6 + Q12 resolved; Q7-Q11 deferred) — commit `932b107`
 - 2026-05-17 — §13 cascade rewrites landed (§2, §3, §4, §5, §7 fully restructured to §12 decisions)
-- **Status: ready for build.** Pick a §13 area and start the corresponding Go package: `infrastructure/state/sqlite/` (most foundational), then `infrastructure/prompts/`, then `cmd/` namespaces (one per §2 namespace).
+- 2026-05-17 — **MVP build complete** on the v2 branch (M1-M10):
+  - state layer: 12 narrow ports + sqlite adapters (M1, M2)
+  - cli surface: 32 verb-namespaced commands across 6 sub-trees (M3-M6, M8)
+  - prompts: text/template renderer + 3 starter templates (M7)
+  - one-shot V4 → V6 migrate path (M9)
+  - end-to-end smoke covers every namespace (M10)
+
+**Status: MVP shipped on v2.** Next stretch (post-MVP): wire L3 agent
+markdown files (`port-pool`, `docker-up`, `healthcheck`, `sweeper` skill
+defs), add the orchestrator-agent invocation glue at the Claude Code layer,
+dogfood against a real nutrition-v2-go epics.md.
