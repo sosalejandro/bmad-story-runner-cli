@@ -80,13 +80,21 @@ func (s *Sweeper) Sweep(ctx context.Context, thresholdMinutesOverride int) (*Swe
 }
 
 // aliveProbe returns true if ANY signal indicates recent activity.
+//
+// "Activity" includes the env's own creation — a freshly-allocated env is
+// alive by definition until enough time has passed to expect a dispatch
+// or a worktree edit. Without this baseline, every just-allocated env
+// would be marked stale on the next sweep before it had a chance to do
+// anything (no dispatches yet, no worktree files yet).
 func (s *Sweeper) aliveProbe(ctx context.Context, storyID string, cutoff time.Time) (bool, error) {
-	// Probe 1: last dispatch return for this story.
-	since, err := s.Dispatch.TokenRollupSince(ctx, cutoff) // cheap rollup; if any dispatch landed, totals will be non-zero
-	if err != nil {
-		return false, fmt.Errorf("sweeper: dispatch probe: %w", err)
+	// Probe 0: the env itself was created within the threshold window.
+	// This is the "give it time to do something" guard.
+	env, err := s.Envs.Get(ctx, storyID)
+	if err == nil && env.CreatedAt.After(cutoff) {
+		return true, nil
 	}
-	_ = since // not enough — TokenRollupSince is sprint-wide. Use ListForStory.
+
+	// Probe 1: a dispatch row landed for this story within the window.
 	dispatches, err := s.Dispatch.ListForStory(ctx, storyID)
 	if err != nil {
 		return false, fmt.Errorf("sweeper: list dispatches %q: %w", storyID, err)
@@ -97,7 +105,7 @@ func (s *Sweeper) aliveProbe(ctx context.Context, storyID string, cutoff time.Ti
 		}
 	}
 
-	// Probe 2: file mtime under worktree.
+	// Probe 2: any file under the worktree was modified within the window.
 	wt, err := s.Worktrees.Get(ctx, storyID)
 	if err == nil { // skip probe when no worktree row exists
 		recent, err := worktreeHasRecentEdit(wt.Path, cutoff)
