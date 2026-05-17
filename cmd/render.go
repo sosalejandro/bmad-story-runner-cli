@@ -43,6 +43,14 @@ func newRenderCmd() *cobra.Command {
 
 			data := map[string]any{}
 
+			// Layer 4 (zero-defaults): pre-seed every optional slot the named
+			// template might dereference. The renderer runs in
+			// missingkey=error strict mode, which is great for catching
+			// required-slot bugs but trips on `{{if .Optional}}` when the
+			// map literally has no Optional key. Seeding with typed-nil /
+			// zero-value lets the template's if-checks evaluate correctly.
+			seedOptionalSlots(args[0], data)
+
 			// Layer 3: config defaults.
 			if needsConfigDefaults(args[0]) {
 				if err := layerConfigDefaults(ctx, data, mode); err != nil {
@@ -105,6 +113,23 @@ func needsConfigDefaults(template string) bool {
 		return true
 	}
 	return false
+}
+
+// seedOptionalSlots pre-populates the named template's optional slots with
+// typed nil / zero values so `{{if .Optional}}` evaluates cleanly under
+// missingkey=error. The renderer still enforces presence of REQUIRED slots —
+// that surface is preserved; this only addresses the "tested-but-not-set"
+// optional pattern.
+func seedOptionalSlots(template string, data map[string]any) {
+	switch template {
+	case "stage_implement":
+		if _, ok := data["PriorAttempt"]; !ok {
+			data["PriorAttempt"] = (*struct{})(nil)
+		}
+		if _, ok := data["EpicContext"]; !ok {
+			data["EpicContext"] = ""
+		}
+	}
 }
 
 func layerConfigDefaults(ctx context.Context, data map[string]any, modeFlag string) error {

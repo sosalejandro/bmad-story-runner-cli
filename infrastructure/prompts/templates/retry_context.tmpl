@@ -9,7 +9,7 @@ This is attempt **#{{.AttemptNo}}**. The previous attempt returned
 
 > {{.PrevReason}}
 
-{{if gt .ConcernsCount 0 -}}
+{{if .ConcernsCount -}}
 There are {{.ConcernsCount}} unresolved gate concern(s) on this story —
 read them via `bmad gate check --raw` and address each before re-attempting.
 {{- else -}}
