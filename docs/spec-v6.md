@@ -410,130 +410,232 @@ infrastructure/state/sqlite/schema/ # numbered migration files
 
 ISP-keystone: no consumer pulls `domain/state.Store` whole; each command/skill depends on the narrow port for its concern.
 
-## 4. Orchestrator agent system prompt structure
+## 4. Orchestrator — template + render pipeline (per §12.3)
 
-Located at `.claude/agents/orchestrator.md`. Key structure:
+The orchestrator does NOT carry a monolithic system prompt. Instead, prompts are **versioned templates** rendered by the CLI per dispatch. Each agent invocation gets exactly the context it needs, no more.
 
-```markdown
----
-name: orchestrator
-description: "Drives BMad v6 story execution end-to-end. Autonomous loop: queries CLI for next-actions, dispatches L3 stage agents in parallel batches, manages per-worktree test-env lifecycle, handles retry budgets + checkpoints. Use when told 'run the sprint [mode]' or 'execute stories autonomously'."
-tools: Bash, Read, Edit, Write, Task
-skills:
-  - sprint-planning
-  - story-checkpoint
-  - test-env-isolation
-  - smart-commit
-  - open-pr
----
+### Why templating
 
-# BMad v6 Orchestrator
+A single fat orchestrator prompt accumulates context cruft over a 180-story sprint: persona rules, lifecycle rules, mode rules, stage-specific instructions, prior-stage output, retry context. It hits context budget limits and becomes diff-unreviewable. Templating splits each concern into a file with a defined slot contract — same hygiene we apply to code.
 
-You are a BMad v6 story-execution orchestrator. AUTONOMOUS LOOP — no user prompts mid-flight except at checkpoints.
-
-## Hard persona rules
-
-- ❌ NEVER do story code work yourself (no impl, no test-writing, no review)
-- ❌ NEVER skip the test-env teardown (try/finally per story)
-- ❌ NEVER advance past a story without updating CLI state
-- ❌ NEVER dispatch a story whose deps aren't satisfied (CLI validates)
-- ✅ Dispatch L3 stage agents via Task tool (Agent / multi-Task in single message for parallel)
-- ✅ Use bmad CLI for ALL state mutations + queries (no inline jq/yaml)
-- ✅ Honor retry budgets per stage; mark blocked + continue on exhaustion
-- ✅ Run try/finally for per-story env (env up → work → env down ALWAYS)
-
-## Inputs
-
-- `mode` (default `pragmatic`) — `pragmatic | strict`
-- `max-parallel` (default from CLI config)
-- `pr-strategy` (default `per-story`) — per-story | batch | end-only
-- `batch-size` (when pr-strategy=batch; default 3)
-- `max-tdd-cycles` (default 3)
-- `max-qa-cycles` (default 3)
-- `max-ci-retries` (default 2)
-- `max-review-iterations` (default 3 — strict mode; pragmatic = 1)
-- `checkpoint-after-stories` (default 4)
-
-## Autonomous loop
+### Pipeline shape
 
 ```
+                                +--------------------------+
+  bmad sprint run --mode <m> -->|   orchestrator process   |
+                                +--------------------------+
+                                            |
+                            +---------------+---------------+
+                            |  per autonomous loop iteration |
+                            +---------------+---------------+
+                                            v
+                  bmad render orchestrator-loop --mode <m> ...
+                                            |
+                                            v
+                  +--------------- prompts/renderer.go ------------+
+                  |  load template -> resolve slots from sqlite +  |
+                  |  filesystem -> emit rendered text              |
+                  +-----------------+------------------------------+
+                                    v
+                          stdout: rendered prompt
+                                    |
+                                    v
+              orchestrator: Task({ subagent_type: <l3>,
+                                   prompt: <rendered text> })
+```
+
+Three layers, three SRP units:
+
+1. **`domain/dispatch/`** — the autonomous loop: "what stage runs next, against which story, with which prior context." Pure logic; no IO.
+2. **`infrastructure/prompts/`** — template registry + renderer (`text/template`). Owns load, slot resolution, rendering. Knows nothing about dispatch logic.
+3. **`infrastructure/agent/`** — Claude Code Agent-tool invoker. Receives rendered prompts; doesn't compose them.
+
+### Template inventory
+
+Lives at `infrastructure/prompts/templates/`. One file per concern:
+
+```
+templates/
+  orchestrator_loop.tmpl       # per-iteration plan: parallel dispatch + retry handling rules
+  stage_hydrate.tmpl           # prompt for story-hydrator L3
+  stage_atdd.tmpl              # prompt for atdd-writer L3 (strict mode)
+  stage_implement.tmpl         # prompt for tdd-implementer L3
+  stage_test_automate.tmpl     # prompt for test-automate L3 (strict mode)
+  stage_test_review.tmpl       # prompt for test-reviewer L3 (strict mode)
+  stage_code_review.tmpl       # prompt for code-reviewer L3
+  stage_commit.tmpl            # prompt for commit + PR step
+  checkpoint_summary.tmpl      # prompt for story-checkpoint skill render
+  retry_context.tmpl           # injected as a sub-block when retry_attempt > 0
+```
+
+### Slot contract (example: `stage_implement.tmpl`)
+
+```text
+{{/* Slot contract:
+       .StoryID         (string)   required
+       .HydratedFile    (string)   required — path on disk
+       .Mode            (string)   pragmatic|strict
+       .EnvConfig       (struct)   pg_port, redis_port, otel_port, db_name
+       .PriorAttempt    (struct)   nil on first try; populated with last failure on retry
+       .EpicContext     (string)   optional excerpt of epic file
+*/}}
+
+# Implement Story {{.StoryID}}
+
+Hydrated spec: {{.HydratedFile}}
+Mode: {{.Mode}}
+
+## Test environment (already up — do NOT recreate)
+
+- PostgreSQL on :{{.EnvConfig.PgPort}}  (db: {{.EnvConfig.DbName}})
+- Redis on :{{.EnvConfig.RedisPort}}
+- OTEL on :{{.EnvConfig.OtelPort}}
+
+{{if .PriorAttempt -}}
+{{template "retry_context.tmpl" .PriorAttempt}}
+{{- end}}
+
+## What to do
+
+Read the hydrated spec. Implement TDD per the checklist. Return JSON.
+... etc ...
+```
+
+The template's first comment block IS the slot contract — it's the only docs needed. Renderer fails fast if a required slot is missing.
+
+### CLI command for rendering
+
+```
+bmad render <template-name> --story <id> [--stage <s>] [--attempt N] [--mode <m>]
+  → stdout: rendered prompt text
+  → exit 0 on success; exit 2 if required slot missing; exit 3 if template unknown
+```
+
+The orchestrator's per-iteration body is:
+
+```text
+For each parallel slot:
+  1. bash: bmad render stage_<s> --story <id> --attempt <n> --mode <m> > /tmp/p-<id>.txt
+  2. Task({ subagent_type: <l3-for-stage>, prompt: $(cat /tmp/p-<id>.txt) })
+Wait for all returns.
+For each return: bash: bmad story set-status / bmad dispatch ... (records tokens)
+```
+
+The orchestrator's own session-resident prompt is now thin: just "render templates, dispatch, collect results, update state via CLI." All policy lives in `orchestrator_loop.tmpl` and the per-stage templates, NOT in the agent's persistent context.
+
+### Hard persona rules (rendered into every orchestrator iteration)
+
+These live in `orchestrator_loop.tmpl`:
+
+- NEVER do story code work yourself (dispatch only)
+- NEVER skip env teardown (try/finally per story)
+- NEVER advance past a story without `bmad story set-status`
+- NEVER dispatch a story whose deps aren't satisfied (CLI validates)
+- ALWAYS use bmad CLI for state mutations (no inline sqlite3 / jq)
+- ALWAYS honor retry budgets per stage; mark blocked + continue on exhaustion
+- ALWAYS render via `bmad render` (no inline prompt composition)
+
+### Inputs (CLI-level, persisted in `config` table)
+
+- `mode` — `pragmatic | strict`
+- `max_parallel` — from `bmad system-check` × user cap
+- `pr_strategy` — `per-story | batch | end-only`
+- `batch_size` (when pr_strategy=batch; default 3)
+- `max_tdd_cycles` (default 3)
+- `max_qa_cycles` (default 3)
+- `max_ci_retries` (default 2)
+- `max_review_iterations` (default 3 strict; 1 pragmatic)
+- `checkpoint.count_threshold` (default 4)
+- `env.stale_threshold_minutes` (default 120)
+
+### Autonomous loop (rendered into `orchestrator_loop.tmpl`)
+
+```text
 Loop:
-  1. CLI: bmad system-check --reserve <reserve_ram>
+  1. CLI: bmad system-check --reserve {{.ReserveRamMb}}
      → { free_ram_mb, max_safe_parallel }
-  2. effective_parallel = MIN(max-parallel-config, max_safe_parallel, mode-cap)
-     where mode-cap = 4 pragmatic, 2 strict (drift tolerance)
-  3. CLI: bmad next-actions --max-parallel <effective_parallel>
-     → batch = [{ story_id, action: hydrate|implement|review|..., env_config? }, ...]
+  2. effective_parallel = MIN(max_parallel_config, max_safe_parallel, mode_cap)
+     where mode_cap = 4 pragmatic, 2 strict (drift tolerance)
+  3. CLI: bmad story next --max-parallel <effective_parallel>
+     → batch = [{ story_id, stage, env_required }, ...]
   4. If batch empty:
-     a. If checkpoint reached → invoke story-checkpoint skill → halt for user-confirm
-     b. If all done → final PR strategy + exit
+     a. CLI: bmad sprint status → query checkpoints table for unresolved trigger
+        - If unresolved checkpoint exists → render checkpoint_summary; HALT for user
+     b. If all done → render final PR strategy + exit
      c. Otherwise → break (sprint exhausted)
   5. PARALLEL DISPATCH (single message, N Task calls):
      For each batch item:
-       a. If story has no env yet AND action != hydrate:
-          CLI: bmad env up <story_id> → env_config
-       b. Dispatch L3 agent matching action:
-          Task({ subagent_type: <agent>, prompt: "<protocol with env_config, hydrated_file, mode>" })
+       a. If story has no env AND stage != hydrate:
+          CLI: bmad env up <story_id> → env_config (persisted in env_allocations)
+       b. bash: bmad render stage_<stage> --story <id> --attempt <n> --mode <m>
+       c. Task({ subagent_type: <l3-for-stage>, prompt: $rendered })
   6. Wait for ALL N returns
   7. For each return:
-     - If status=ok: CLI: bmad set-status <id> <next_stage_or_complete>
+     - CLI: bmad dispatch record <id> <stage> <status> --tokens <i:o:cr:cc> --duration <ms>
+       (writes dispatches row per §12.7)
+     - If status=ok: CLI: bmad story set-status <id> <next_stage_or_complete>
      - If status=blocked:
-       - Increment retry counter
-       - If budget exhausted: CLI: bmad set-status <id> blocked; CLI: bmad env down <id> (try/finally)
-       - Else: CLI: bmad set-status <id> <same_stage_pending_retry>
-     - If status=done AND env present: CLI: bmad env down <id>; CLI: bmad set-complete <id>
-  8. Goto Loop
+       - CLI: bmad story set-status increments retry_counts
+       - If budget exhausted: CLI: bmad story set-status <id> blocked; CLI: bmad env down <id>
+       - Else: same stage, attempt_no++
+     - If status=done AND env present: CLI: bmad env down <id>; CLI: bmad story complete <id>
+  8. CLI: bmad story checkpoint <id> evaluates §12.5 dual trigger; if fired → goto 4a next loop
+  9. Goto Loop
 ```
 
-## Mode-driven dispatch
+### Mode-driven dispatch (rendered into per-stage templates)
 
-**Pragmatic** stages per story: hydrate → tdd-implement → code-review → commit
-**Strict** stages per story: hydrate → atdd → tdd-implement → test-automate → test-review → code-review → commit
-  + STRICT: code-review iterates till clean (max-review-iterations); pragmatic = 1 round
+**Pragmatic** stages per story: `hydrate → implement → code-review → commit`
+**Strict** stages per story: `hydrate → atdd → implement → test-automate → test-review → code-review → commit`
+  - STRICT: code-review iterates till clean (`max_review_iterations`); pragmatic = 1 round
 
-## Try/finally infra lifecycle
+### Try/finally infra lifecycle
 
 For each story, regardless of success/failure:
-1. CLI: bmad env up <story> → env_config (allocates ports, brings up Docker)
-2. <do work via L3 dispatches>
-3. CLI: bmad env down <story> — ALWAYS, even on failure
-4. CLI: bmad worktree destroy <story> — after PR opened (or on user-confirm)
 
-Exception handler at orchestrator level: on crash/interrupt, iterate active stories + run env-down for each.
+1. CLI: `bmad env up <story>` → env_config (allocates ports, brings up Docker, writes env_allocations row)
+2. `<dispatch work via L3 agents>`
+3. CLI: `bmad env down <story>` — ALWAYS, even on failure (marks env_allocations.reclaimed_at)
+4. CLI: `bmad worktree destroy <story>` — after PR opened (or on user-confirm)
 
-## Checkpoint behavior
+Exception handler at orchestrator level: on crash/interrupt, the orchestrator iterates active stories from SQLite + runs `bmad env down` for each. On next sprint resume, `bmad env cleanup-orphans` runs the activity-based sweep (§12.6) to catch anything the crash missed.
 
-After every `checkpoint-after-stories` stories complete:
-1. CLI: bmad status (overview)
-2. Invoke `story-checkpoint` skill → produces summary of last N stories + drift assessment
-3. HALT — emit summary + ask user: continue | adjust | halt
-4. User responds → CLI: bmad sprint-resume → continue OR CLI: bmad sprint-pause → exit
+### Checkpoint behavior (dual trigger per §12.5)
 
-## Failure handling per stage
+After EACH story completes, `bmad story checkpoint <id>` evaluates both triggers and may fire:
 
-| Stage | On blocked | Retry budget | Exhausted action |
-| ----- | ---------- | ------------ | ---------------- |
-| hydrate | CLI: bmad add-concerns + bmad set-status blocked | 1 (deterministic) | Mark blocked; env not yet up so no teardown needed |
-| atdd / test-automate | CLI: bmad add-concerns | 1 | Mark blocked; env down |
-| tdd-implement | CLI: bmad add-concerns | max-tdd-cycles (default 3) | Mark blocked; env down |
-| test-review | CLI: bmad add-concerns | re-dispatch tdd-implement (max-qa-cycles) | Mark blocked; env down |
-| code-review | If iterate: re-dispatch tdd-implement | max-review-iterations | Mark blocked; env down |
-| commit / CI | If task check fails: re-engage tdd-implement | max-ci-retries | Mark blocked; env down |
+- **Count trigger**: `(stories_since_last_checkpoint >= config.checkpoint.count_threshold)`
+- **Complexity trigger**: `(just-completed story.complexity == 'high')`
 
-## Output (return JSON to user)
+Either trigger writes a `checkpoints` row with `trigger_kind` and `user_decision = NULL`. The orchestrator's next loop iteration (step 4a) detects the unresolved row, renders `checkpoint_summary.tmpl`, HALTs and emits the summary to the user. User runs `bmad sprint resume` (continue) or `bmad sprint pause` (adjust/halt), which writes `user_decision + decided_at`.
+
+### Failure handling per stage
+
+| Stage                | On blocked                                | Retry budget                 | Exhausted action                                |
+| -------------------- | ----------------------------------------- | ---------------------------- | ----------------------------------------------- |
+| hydrate              | `bmad gate write --concerns ...`          | 1 (deterministic)            | Mark blocked; env not yet up so no teardown     |
+| atdd / test-automate | `bmad gate write --concerns ...`          | 1                            | Mark blocked; `bmad env down`                   |
+| implement            | `bmad gate write --concerns ...`          | `max_tdd_cycles` (3)         | Mark blocked; `bmad env down`                   |
+| test-review          | `bmad gate write --concerns ...`          | re-dispatch implement (`max_qa_cycles`) | Mark blocked; `bmad env down`        |
+| code-review          | If iterate: re-dispatch implement         | `max_review_iterations`      | Mark blocked; `bmad env down`                   |
+| commit / CI          | If `task check` fails: re-engage implement| `max_ci_retries`             | Mark blocked; `bmad env down`                   |
+
+### Output (return JSON to user at sprint end or HALT)
 
 ```json
 {
   "mode": "pragmatic",
   "total_stories": 180,
-  "completed": ["1.1", "1.2", ...],
-  "blocked": [{ "story_id": "4.7", "reason": "..." }],
+  "completed": ["1.1", "1.2"],
+  "blocked": [{ "story_id": "4.7", "reason": "tdd budget exhausted" }],
   "in_progress": [],
-  "checkpoint_reached": false,
-  "duration_minutes": 240
+  "checkpoint_reached": { "id": 12, "trigger_kind": "complexity", "trigger_detail": "complexity:9.3" },
+  "duration_minutes": 240,
+  "total_tokens": { "input": 2400000, "output": 380000, "cache_read": 6100000, "cache_create": 450000 }
 }
 ```
-```
+
+Token rollup is queried from `dispatches` table at emit time (per §12.7).
 
 ## 5. Composable skills
 
