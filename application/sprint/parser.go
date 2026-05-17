@@ -37,7 +37,9 @@ type ParsedStory struct {
 }
 
 var (
-	storyHeaderRE = regexp.MustCompile(`^###\s+Story\s+([\d\.]+)\s*[:\-]\s*(.+)$`)
+	// Story ID accepts any run of letters/digits/dot/dash/underscore — matches
+	// both "4.1" and "1.1.payment-method-management" and slug-style ids.
+	storyHeaderRE = regexp.MustCompile(`^###\s+Story\s+([\w.\-]+)\s*[:\-]\s*(.+)$`)
 )
 
 // ParseEpicsFile reads an epics.md file and returns every story it contains.
