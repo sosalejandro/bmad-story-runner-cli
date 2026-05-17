@@ -43,6 +43,8 @@ so Claude does not need to write inline Python or bash scripts.`,
 		newStoryCmd(),      // v6 — story namespace
 		newEnvCmd(),        // v6 — env namespace (port-pool + sweeper)
 		newWorktreeCmd(),   // v6 — worktree namespace
+		newDepguardCmd(),   // v6 — depguard flip ratchet
+		newGateCmd(),       // v6 — gate namespace (v4 surface preserved)
 		newStatusCmd(),
 		newSetStatusCmd(),
 		newSetCompleteCmd(),
