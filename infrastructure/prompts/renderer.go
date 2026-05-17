@@ -102,6 +102,8 @@ func seedOptionalSlots(template string, data map[string]any) {
 		setDefault(data, "PriorAttempt", (*struct{})(nil))
 		setDefault(data, "EpicContext", "")
 		setDefault(data, "IdempotencyKey", "")
+	case "orchestrator_loop":
+		setDefault(data, "ClaimerID", "orchestrator")
 	}
 }
 

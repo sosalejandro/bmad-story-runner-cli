@@ -144,6 +144,11 @@ func layerConfigDefaults(ctx context.Context, data map[string]any, modeFlag stri
 	} else {
 		data["ReserveRamMB"] = 8000
 	}
+	// ClaimerID is optional in the template — seed empty default so
+	// missingkey=error doesn't trip when the caller didn't supply it.
+	if _, ok := data["ClaimerID"]; !ok {
+		data["ClaimerID"] = "orchestrator"
+	}
 	return nil
 }
 

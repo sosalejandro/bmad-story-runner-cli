@@ -19,14 +19,15 @@ After install, Claude Code auto-discovers them at session start.
 
 ## Inventory
 
-| Skill              | Layer        | CLI command(s) it wraps                                       |
-| ------------------ | ------------ | ------------------------------------------------------------- |
-| `port-pool`        | infra (SRP)  | `bmad env up <id>` + `bmad env down <id>`                     |
-| `docker-up`        | infra (SRP)  | renders `.env.test` + runs `docker compose ... up -d`         |
-| `healthcheck`      | infra (SRP)  | `pg_isready`, `redis-cli ping`, `curl` polls                  |
-| `sweeper`          | infra (SRP)  | `bmad env cleanup-orphans` + targeted `docker compose down`   |
-| `sprint-planning`  | sprint-level | `bmad sprint plan`                                            |
-| `story-checkpoint` | sprint-level | `bmad story checkpoint <id>`                                  |
+| Skill                 | Layer        | CLI command(s) it wraps                                       |
+| --------------------- | ------------ | ------------------------------------------------------------- |
+| `port-pool`           | infra (SRP)  | `bmad env up <id>` + `bmad env down <id>`                     |
+| `docker-up`           | infra (SRP)  | renders `.env.test` + runs `docker compose ... up -d`         |
+| `healthcheck`         | infra (SRP)  | `pg_isready`, `redis-cli ping`, `curl` polls                  |
+| `sweeper`             | infra (SRP)  | `bmad env cleanup-orphans` + targeted `docker compose down`   |
+| `sprint-planning`     | sprint-level | `bmad sprint plan`                                            |
+| `story-checkpoint`    | sprint-level | `bmad story checkpoint <id>` (dual-trigger §12.5)             |
+| `context-propagation` | sprint-level | post-completion downstream-drift scan; surfaces re-hydrate signals |
 
 The four infra skills are the §12.4 SRP split of the proposed
 `test-env-isolation` skill — each owns one concern, composes via the
@@ -35,27 +36,57 @@ orchestrator (or higher-level `bmad env up`).
 The two sprint-level skills wrap the planner + dual-trigger checkpoint
 logic that the orchestrator agent invokes on every loop iteration.
 
-## How they compose
+## How they compose (rolling-window, per-session)
+
+The recommended orchestrator pattern is **N independent sessions, each
+running one story at a time**. Each session loops:
 
 ```
-sprint-planning
+sprint-planning  (runs ONCE per sprint, by one session)
      ↓ (writes batches + stories)
-[orchestrator loop]
-     ↓ (picks story from batch)
-worktree-create (planned)
-     ↓ (writes worktree row, suggests git cmd)
-port-pool ──→ docker-up ──→ healthcheck
-     ↓            ↓             ↓
-  env_config   .env.test   "ready"
-     ↓
-[L3 agent dispatch — hydrate, implement, etc.]
-     ↓ (on each completion)
-story-checkpoint ──→ (HALT if fired)
-     ↓ (else continue)
-[next story]
-     ↓ (periodically)
-sweeper ──→ tear down stale envs
+
+[per-session loop — N sessions running this in parallel]
+     │
+     ├─ bmad story next --max-parallel 1 --claim --claimer <session-id>
+     │      ↓ (atomic claim — no two sessions ever pick the same story)
+     │
+     ├─ port-pool ──→ docker-up ──→ healthcheck
+     │      ↓            ↓             ↓
+     │   env_config   .env.test   "ready"
+     │
+     ├─ bmad dispatch begin → idempotency key
+     │      ↓ (key flows into the rendered prompt)
+     │
+     ├─ bmad render stage_<X> --idempotency-key <key>
+     │      ↓
+     │   [Task() — L3 agent dispatch]
+     │      ↓
+     ├─ bmad dispatch record --key <key> --status <ok|blocked|errored>
+     │      ↓
+     ├─ bmad story complete  (releases claim)
+     │      ↓
+     ├─ context-propagation  ──→ (surface downstream re-hydrate signals)
+     │      ↓
+     ├─ story-checkpoint     ──→ (HALT if §12.5 dual trigger fires)
+     │      ↓
+     └─ loop (back to `bmad story next`)
+
+[sweeper — runs periodically, independent of the per-story loop]
+     ↓ activity-based detection
+     ↓ tear down stale envs that crashed sessions left behind
 ```
+
+### Why per-session parallelism, not per-call
+
+Claude Code's `Task()` tool blocks until ALL spawned subagents return.
+A single session dispatching 4 in parallel sits idle until the slowest
+finishes. N independent sessions, each at parallelism=1, maintain
+N-way throughput with no batch-barrier waste. The atomic claim
+(`bmad story next --claim`) makes this safe — no two sessions ever
+work the same story.
+
+See `infrastructure/prompts/templates/orchestrator_loop.tmpl` for the
+full per-session script.
 
 ## Why thin wrappers (not Go re-implementations)
 
