@@ -1101,16 +1101,21 @@ Whichever fires first.
 
 **Source**: Claude Code emits this metadata in tool/agent result payloads. The dispatcher reads it from the agent's return JSON and persists.
 
-## 13. Cascading rewrites required (build-prep punch list)
+## 13. Cascading rewrites — COMPLETED 2026-05-17
 
-These spec sections need rewrites to reflect §12 decisions before code starts. None block planning, but should land in the v2 branch as separate commits for reviewability:
+All five cascade rewrites from the §12 pressure-test landed as separate commits on v2:
 
-- **§3 (State schema)** — rewrite from JSON-extensions framing to SQLite schema (tables listed in §12.2)
-- **§4 (Orchestrator agent system prompt structure)** — rewrite as template + render pipeline (per §12.3); list the templates by name + their slot contracts
-- **§5 (Composable skills)** — replace `test-env-isolation` block with the four split skills (per §12.4); add `story-checkpoint` parameter contract for `checkpoint_reason` (per §12.5)
-- **§2 (V6 CLI command set)** — restructure to verb-namespaces (per §12.1); count should fall to high-20s
-- **§7 (Per-repo config schema)** — add `checkpoint.count_threshold`, `env.stale_threshold_minutes` keys
+- ✅ **§2 (CLI command set)** — verb-namespaced, 32 commands — commit `738c886`
+- ✅ **§3 (State schema)** — full SQLite DDL (12 tables) — commit `6e20ced`
+- ✅ **§4 (Orchestrator)** — template + render pipeline — commit `0d50af2`
+- ✅ **§5 (Composable skills)** — test-env-isolation split into 4 SRP skills (port-pool / docker-up / healthcheck / sweeper); story-checkpoint dual-trigger contract — commit `fe76e8b`
+- ✅ **§7 (Config schema)** — three-layer model + new keys (`checkpoint.count_threshold`, `env.stale_threshold_minutes`, story `complexity`) — commit `b0addcf`
+
+Build phase can start against this spec.
 
 ## Spec sign-off
 
-Original spec captured 2026-05-16. Pressure-test resolved Q1-Q6 + Q12 on 2026-05-16 (this revision). Q7-Q11 deferred. §13 lists the cascade rewrites that should land before code starts.
+- 2026-05-16 — original spec captured (seed commit `b606673`)
+- 2026-05-16 — §12 pressure-test decisions recorded (Q1-Q6 + Q12 resolved; Q7-Q11 deferred) — commit `932b107`
+- 2026-05-17 — §13 cascade rewrites landed (§2, §3, §4, §5, §7 fully restructured to §12 decisions)
+- **Status: ready for build.** Pick a §13 area and start the corresponding Go package: `infrastructure/state/sqlite/` (most foundational), then `infrastructure/prompts/`, then `cmd/` namespaces (one per §2 namespace).
