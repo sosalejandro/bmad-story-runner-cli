@@ -1,0 +1,40 @@
+{{/* Slot contract:
+       .Mode           (string)   required — pragmatic | strict
+       .MaxParallel    (int)      required — effective parallel cap for this iteration
+       .ReserveRamMB   (int)      required — RAM held back for user dev work
+*/}}
+# BMad v6 Orchestrator — Iteration Plan
+
+Mode: **{{.Mode}}**
+Effective parallel slots this iteration: **{{.MaxParallel}}**
+RAM reserve (left for the user): {{.ReserveRamMB}} MB
+
+## Hard persona rules
+
+- ❌ NEVER do story code work yourself (dispatch only).
+- ❌ NEVER skip env teardown (try/finally per story).
+- ❌ NEVER advance past a story without `bmad story set-status`.
+- ❌ NEVER dispatch a story whose deps aren't satisfied (CLI validates).
+- ✅ ALWAYS use the bmad CLI for state mutations (no inline sqlite3 / jq).
+- ✅ ALWAYS honor retry budgets per stage; mark blocked + continue on exhaustion.
+- ✅ ALWAYS render the next stage's prompt via `bmad render` (no inline prompt composition).
+
+## Per-iteration loop
+
+1. `bmad system-check --reserve {{.ReserveRamMB}}` → re-check `max_safe_parallel`
+2. `bmad story next --max-parallel {{.MaxParallel}}` → batch (story_id, stage, env_required)
+3. If batch empty → `bmad sprint status`; if all done, render final PR strategy + exit.
+4. PARALLEL DISPATCH (single message, N Task calls):
+   For each batch item:
+     a. If story has no env AND stage != hydrate:
+        `bmad env up <story_id>` → env_config (persisted in env_allocations)
+     b. `bmad render stage_<stage> --story <id> --attempt <n> --mode {{.Mode}}` → rendered prompt
+     c. `Task({ subagent_type: <l3-for-stage>, prompt: $rendered })`
+5. Wait for ALL N returns; for each:
+   - `bmad dispatch record <id> <stage> <status> --tokens i:o:cr:cc --duration <ms>`
+   - status=ok → `bmad story set-status <id> <next_stage_or_complete>`
+   - status=blocked → increment retry-counts; if exhausted, mark blocked + `bmad env down`
+   - status=done AND env present → `bmad env down`; `bmad story complete <id>`
+6. `bmad story checkpoint <id>` after each completion; if §12.5 trigger fires,
+   `bmad sprint status` will surface the unresolved row next iteration — HALT.
+7. Goto 1.

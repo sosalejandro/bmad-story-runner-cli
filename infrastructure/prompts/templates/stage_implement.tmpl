@@ -1,0 +1,50 @@
+{{/* Slot contract:
+       .StoryID        (string)   required
+       .HydratedFile   (string)   required — path on disk
+       .Mode           (string)   required — pragmatic | strict
+       .EnvConfig      (struct)   required — {PgPort, RedisPort, OtelPort, DbName}
+       .PriorAttempt   (*struct)  optional — populated on retries; nil on first try
+       .EpicContext    (string)   optional — excerpt of epic file for context
+*/}}
+# Implement Story {{.StoryID}}
+
+Hydrated spec: `{{.HydratedFile}}`
+Mode: **{{.Mode}}**
+
+## Test environment (already up — do NOT recreate)
+
+- PostgreSQL on `:{{.EnvConfig.PgPort}}`  (db: `{{.EnvConfig.DbName}}`)
+- Redis on `:{{.EnvConfig.RedisPort}}`
+{{if .EnvConfig.OtelPort -}}
+- OTEL on `:{{.EnvConfig.OtelPort}}`
+{{- end}}
+
+{{if .PriorAttempt -}}
+## Prior attempt summary
+
+{{template "retry_context" .PriorAttempt}}
+{{- end}}
+
+{{if .EpicContext -}}
+## Epic context
+
+{{.EpicContext}}
+{{- end}}
+
+## What to do
+
+1. Read the hydrated spec at `{{.HydratedFile}}`.
+2. Run TDD per the spec's checklist (red → green → refactor).
+3. Run `task check` (or repo-equivalent) before signaling completion.
+4. Emit JSON result:
+
+```json
+{
+  "story_id": "{{.StoryID}}",
+  "stage": "implement",
+  "status": "ok|blocked|errored",
+  "reason": "...",
+  "files_changed": ["..."],
+  "tests_added": ["..."]
+}
+```

@@ -1,0 +1,18 @@
+{{/* Slot contract:
+       .AttemptNo       (int)     required
+       .PrevStatus      (string)  required
+       .PrevReason      (string)  required
+       .ConcernsCount   (int)     required — number of unresolved gate concerns
+*/}}
+This is attempt **#{{.AttemptNo}}**. The previous attempt returned
+`{{.PrevStatus}}` with the reason:
+
+> {{.PrevReason}}
+
+{{if gt .ConcernsCount 0 -}}
+There are {{.ConcernsCount}} unresolved gate concern(s) on this story —
+read them via `bmad gate check --raw` and address each before re-attempting.
+{{- else -}}
+No prior concerns recorded; the previous failure was implementation-level
+(test, build, or lint). Re-inspect the diff and address the root cause.
+{{- end}}
