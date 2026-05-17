@@ -45,6 +45,9 @@ so Claude does not need to write inline Python or bash scripts.`,
 		newWorktreeCmd(),   // v6 — worktree namespace
 		newDepguardCmd(),   // v6 — depguard flip ratchet
 		newGateCmd(),       // v6 — gate namespace (v4 surface preserved)
+		newDispatchCmd(),   // v6 — dispatch record (§12.7 token cost)
+		newRenderCmd(),     // v6 — prompt template render
+		newSystemCheckCmd(), // v6 — host resource probe
 		newStatusCmd(),
 		newSetStatusCmd(),
 		newSetCompleteCmd(),
