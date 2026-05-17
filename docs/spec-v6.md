@@ -74,105 +74,109 @@ Therefore:
 - KEEP `.claude/agents/{story-hydrator,atdd-writer,tdd-implementer,test-automate,test-reviewer,code-reviewer}.md` (L3 agents)
 - ADD `.claude/agents/orchestrator.md` (top-level, has Agent/Task tool for L3 dispatch)
 
-## 2. V6 CLI command set
+## 2. V6 CLI command set (verb-namespaced per §12.1)
 
-### V4 commands preserved (unchanged behavior)
+Each `bmad` subtree is one Go package under `cmd/`. Root-level commands are cross-cutting; verb-namespaced commands group around a single SRP unit (story, sprint, env, worktree, depguard, gate). State store is SQLite (`bmad-state.db` per docs-folder); no positional JSON path arg required — commands resolve state from cwd or `--state` override.
 
-```
-bmad init <docs-folder>                          # scan stories, create progress JSON
-bmad status <progress-json>                      # progress summary table
-bmad scan <docs-folder>                          # list stories with task counts
-bmad set-status <json> <id> <status>             # update story status
-bmad set-complete <json> <id>                    # mark complete after CI passes
-bmad bulk-complete <json> <id...>                # batch completion
-bmad mark-story-file <file> <status>             # patch **Status:** in markdown
-bmad add-concerns <json> <id> <json-array>       # append QA concerns
-bmad write-gate <json> <id> <PASS|FAIL|CONCERNS> # write QA gate YAML
-bmad gate-check <json>                           # read gate files, print results
-bmad reconcile <json>                            # apply gate results to progress
-bmad qa-pending <docs-folder>                    # list stories needing QA
-bmad exec --reason "<why>" -- <cmd>              # audit-wrap arbitrary command
-bmad log show|stats|patterns|rotate              # audit log viewing
-```
-
-### V4 commands extended
+### Root-level (cross-cutters)
 
 ```
-bmad next <json> [--group N --filter-group]
-  → V6 EXTENSION: --max-parallel N
-  → Returns parallel-eligible next-action list:
-    [{ story_id, action: "hydrate|implement|review|...", env_config }, ...]
-
-bmad list <json> [--group N --status <s> --unblocked-only --show-blockers]
-  → V6 EXTENSION: --stage <current_stage>, --has-env, --mode <pragmatic|strict>
-
-bmad assign-groups <json> <N>
-  → V6 EXTENSION: detects file-overlap from story metadata `affects: [...]`;
-    refuses to group stories with overlapping files in same parallel batch
+bmad init [<docs-folder>]                   # scaffold bmad-state.db + scan stories
+bmad migrate [--from <progress.json>]       # V4 progress.json → V6 SQLite, one-shot
+bmad system-check [--reserve <ram_mb>]      # { free_ram_mb, cpu_load, max_safe_parallel }
+bmad config <key> [<value>]                 # get/set persistent config (mode, max_parallel, reserve_ram_mb, checkpoint.count_threshold, env.stale_threshold_minutes)
+bmad dispatch <stage> <story-id>            # manual L3 invocation (escape hatch)
+bmad exec --reason "<why>" -- <cmd>         # audit-wrap arbitrary command (V4 preserved)
+bmad log <show|stats|patterns|rotate>       # audit log viewing (V4 preserved)
 ```
 
-### V6 new commands
+### `bmad story <verb>` (per-story lifecycle)
 
 ```
-# Worktree management
-bmad worktree create <story-id>
-  → Creates .worktrees/story-<id>/; returns worktree path + allocated branch name
-bmad worktree destroy <story-id>
-  → Deletes worktree + branch (after PR merge or explicit cleanup)
-bmad worktree list
-  → Active worktrees + their stories + state
+bmad story status [<story-id>]              # one-row or table view; filters: --stage --has-env --status
+bmad story hydrate <story-id> [--re-hydrate]
+bmad story next [--max-parallel N]          # parallel-eligible next-action batch
+bmad story checkpoint <story-id>            # mark checkpoint reached
+bmad story set-status <story-id> <status>   # admin escape; also patches markdown frontmatter
+bmad story complete <story-id...>           # variadic; folds V4 bulk-complete
+```
 
-# Test-env isolation
-bmad env up <story-id> [--config .bmad-test-env.yml]
-  → Reads per-repo config; allocates port set; renders docker-compose; brings up infra;
-    returns env JSON { pg_port, redis_port, otel_port, db_name, container_ids }
-bmad env down <story-id>
-  → docker-compose down -v; releases port allocation
-bmad env cleanup-orphans
-  → Periodic sweep: finds [bmad-test-env]-tagged containers older than 4h; kills + cleans
-bmad system-check [--reserve <ram_mb>]
-  → Returns { free_ram_mb, cpu_load, max_safe_parallel: int }
-  → --reserve flag accounts for user's other dev work
+### `bmad sprint <verb>` (sprint-level orchestration)
 
-# JIT hydration
-bmad hydrate <story-id>
-  → Dispatches story-hydrator L3 agent; returns hydrated_file_path
-  → Idempotent: refuses to re-hydrate existing file unless --re-hydrate
+```
+bmad sprint plan [--assign-groups N]        # invokes sprint-planning skill; persists batches
+bmad sprint run [--mode pragmatic|strict]   # launches orchestrator (autonomous loop)
+bmad sprint pause                           # halt orchestrator after current dispatch returns
+bmad sprint resume                          # continue after pause or checkpoint
+bmad sprint status                          # sprint-aggregate view (batches, blocked, in-flight, tokens-spent)
+```
 
-# Dependencies + planning
-bmad dependency-graph
-  → Visualizes dep graph from epics.md per-story frontmatter
-bmad next-actions [--max-parallel N]
-  → Returns parallel batch: [{ story, action, env_config }, ...]
-    respecting deps + file-overlap + max-parallel + system resources
+### `bmad env <verb>` (per-story test infrastructure)
 
-# Mode + config
-bmad mode <pragmatic|strict>
-  → Sets persistent mode for this docs folder
-bmad config max-parallel <N>
-  → Sets persistent parallelism cap
-bmad config reserve-ram <MB>
-  → Persistent reservation (e.g., 8000 = leave 8GB for other work)
+```
+bmad env up <story-id>                      # allocates ports + renders .env.test + docker-compose up + healthchecks
+bmad env down <story-id>                    # docker-compose down -v + releases ports + marks env_allocations reclaimed
+bmad env status [<story-id>]                # active envs, port allocations, activity-probe age
+bmad env cleanup-orphans                    # sweeper: activity-based stale detection per §12.6
+```
 
-# Depguard flip tracking
-bmad depguard-flip <rule>
-  → Marks per-rule global flip from warn → error; CI gates on this
-bmad depguard-status
-  → Shows per-rule flip state (warn/error per rule)
+### `bmad worktree <verb>` (worktree lifecycle)
 
-# Checkpoint mechanism
-bmad checkpoint <story-id> [--user-confirm continue|adjust|halt]
-  → Marks checkpoint reached; if --user-confirm halt → orchestrator pauses
-bmad sprint-pause / bmad sprint-resume
-  → User-initiated pause/resume of orchestrator
+```
+bmad worktree create <story-id>             # .worktrees/story-<id>/ + branch
+bmad worktree destroy <story-id>            # delete worktree + branch (post-PR or explicit)
+bmad worktree list                          # active worktrees + stories + state
+bmad worktree prune                         # delete worktrees whose stories are complete + merged
+```
+
+### `bmad depguard <verb>` (per-rule flip tracking)
+
+```
+bmad depguard flip <rule>                   # warn → error; persisted in SQLite + CI gates on it
+bmad depguard status                        # per-rule flip state
+bmad depguard history                       # flip timeline per rule
+```
+
+### `bmad gate <verb>` (QA gate, V4 surface preserved)
+
+```
+bmad gate write <story-id> <PASS|FAIL|CONCERNS> [--concerns <json-array>]   # folds V4 write-gate + add-concerns
+bmad gate check                             # read gate files, print results
+bmad gate reconcile                         # apply gate results to story status
 ```
 
 ### Command-count summary
 
-- V4: 18 commands
-- V6 new: 16 commands (worktree:3, env:4, system:1, hydrate:1, deps:2, mode/config:3, depguard:2, checkpoint:3)
-- V4 extended: 3 commands (next, list, assign-groups)
-- **V6 total: ~37 commands**
+- Root cross-cutters: 7
+- `story` namespace: 6
+- `sprint` namespace: 5
+- `env` namespace: 4
+- `worktree` namespace: 4
+- `depguard` namespace: 3
+- `gate` namespace: 3
+- **V6 total: 32 commands** (down from V4-extended sketch of 37)
+
+Each namespace stays at or below ~6 verbs. If a namespace grows past that during build, treat it as a smell — split or relocate verbs.
+
+### V4 → V6 mapping (for migration users)
+
+| V4 command                    | V6 equivalent                                     |
+| ----------------------------- | ------------------------------------------------- |
+| `bmad status <json>`          | `bmad story status` + `bmad sprint status`        |
+| `bmad scan <docs>`            | `bmad story status` (no story-id → table view)    |
+| `bmad set-status <json> <id>` | `bmad story set-status <id>`                      |
+| `bmad set-complete <json>`    | `bmad story complete <id>`                        |
+| `bmad bulk-complete`          | `bmad story complete <id1> <id2> ...`             |
+| `bmad mark-story-file`        | (folded into `bmad story set-status` — atomic)    |
+| `bmad add-concerns`           | (folded into `bmad gate write --concerns`)        |
+| `bmad write-gate`             | `bmad gate write`                                 |
+| `bmad gate-check`             | `bmad gate check`                                 |
+| `bmad reconcile`              | `bmad gate reconcile`                             |
+| `bmad qa-pending`             | `bmad story status --stage qa`                    |
+| `bmad next`                   | `bmad story next`                                 |
+| `bmad list`                   | `bmad story status` (with filter flags)           |
+| `bmad assign-groups`          | `bmad sprint plan --assign-groups N`              |
+| `bmad mode <p\|s>`            | `bmad config mode <p\|s>`                         |
 
 ## 3. State schema
 
