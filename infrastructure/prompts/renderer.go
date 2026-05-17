@@ -116,6 +116,8 @@ func seedOptionalSlots(template string, data map[string]any) {
 		setDefault(data, "IdempotencyKey", "")
 	}
 	switch template {
+	case "stage_hydrate":
+		setDefault(data, "CacheBundlePath", "")
 	case "stage_implement":
 		setDefault(data, "EpicContext", "")
 	case "orchestrator_loop":

@@ -24,6 +24,7 @@ var DefaultConfig = map[string]string{
 	"checkpoint.count_threshold":    "4",
 	"env.stale_threshold_minutes":   "120",
 	"propagation.auto_rehydrate":    "false",
+	"sprint.cache_bundle_path":      "", // empty = not configured; `bmad sprint cache-bundle` sets it
 }
 
 // InitUseCase seeds an empty v6 state store with default config rows.

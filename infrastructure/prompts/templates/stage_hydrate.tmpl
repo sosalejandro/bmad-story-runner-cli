@@ -1,11 +1,15 @@
 {{/* Slot contract:
-       .StoryID         (string)   required
-       .Mode            (string)   required — pragmatic | strict
-       .EpicsPath       (string)   required — path to epics.md the story lives in
+       .StoryID          (string)   required
+       .Mode             (string)   required — pragmatic | strict
+       .EpicsPath        (string)   required — path to epics.md the story lives in
        .ArchitecturePath (string)  required — path to the architecture doc
-       .HydratedFile    (string)   required — where the hydrated spec WILL be written
-       .PriorAttempt    (*struct)  optional
-       .IdempotencyKey  (string)   optional
+       .HydratedFile     (string)   required — where the hydrated spec WILL be written
+       .CacheBundlePath  (string)   optional — pre-bundled corpus (built via
+                                    `bmad sprint cache-bundle`); when present
+                                    the agent reads it ONCE instead of 5+ files.
+                                    Auto-populated from config.sprint.cache_bundle_path.
+       .PriorAttempt     (*struct)  optional
+       .IdempotencyKey   (string)   optional
 */}}
 # Hydrate Story {{.StoryID}}
 
@@ -15,12 +19,38 @@ You are the **story-hydrator** L3 agent. Take this lightweight story from
 
 Mode: **{{.Mode}}**
 
-## Source inputs
+{{if .CacheBundlePath -}}
+## Standing corpus (read this ONCE — pre-bundled)
+
+`{{.CacheBundlePath}}` contains the architecture canon + BC audit (+
+supplement) + EDA cutover decision tree + saga-to-slice mapping
+concatenated with anchor headings. The bundle is byte-identical across
+hydrator dispatches in this sprint, so Read it FIRST and rely on the
+contents for cross-cutting context — do NOT re-read the individual
+source files unless you need a section the bundle missed.
+
+This saves ~5 file reads (and the associated tokens) compared to
+reading each source separately, and gives Claude's auto-prompt-caching
+a stable prefix it can hit on subsequent hydrator dispatches.
+
+If `{{.CacheBundlePath}}` does NOT exist on disk, fall back to reading
+the individual sources listed below.
+
+## Per-story inputs (always read fresh)
+
+- Lightweight story: in `{{.EpicsPath}}` under `### Story {{.StoryID}}:`
+
+{{- else -}}
+## Source inputs (fallback — no cache bundle configured)
 
 - Lightweight story: in `{{.EpicsPath}}` under `### Story {{.StoryID}}:`
 - Architecture canon: `{{.ArchitecturePath}}`
 - Companion artifacts (BC audit, saga mapping, Pattern Applicability Matrix):
   in the same `docs/architecture/eda-cutover/` directory
+
+Tip: run `bmad sprint cache-bundle` once per sprint to skip the
+5-file-read overhead on every hydrator dispatch.
+{{- end}}
 
 {{if .PriorAttempt -}}
 ## Prior attempt summary

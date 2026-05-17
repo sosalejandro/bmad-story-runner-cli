@@ -56,6 +56,14 @@ func newRenderCmd() *cobra.Command {
 				}
 			}
 
+			// Layer 3.5: template-specific config auto-pull.
+			//   stage_hydrate → CacheBundlePath from config.sprint.cache_bundle_path
+			if args[0] == "stage_hydrate" {
+				if err := layerCacheBundle(ctx, data); err != nil {
+					return err
+				}
+			}
+
 			// Layer 2: auto-resolve story + env.
 			if storyID != "" {
 				if err := layerStory(ctx, data, storyID, stageFlag, attempt, mode); err != nil {
@@ -197,6 +205,26 @@ func layerEnv(ctx context.Context, data map[string]any, storyID string) error {
 		envCfg["OtelPort"] = *a.OtelPort
 	}
 	data["EnvConfig"] = envCfg
+	return nil
+}
+
+// layerCacheBundle pulls the configured sprint.cache_bundle_path into
+// data["CacheBundlePath"] if present. Empty (or unset) is left empty —
+// the template falls back to listing individual source files.
+func layerCacheBundle(ctx context.Context, data map[string]any) error {
+	db, err := openV6DB(ctx)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	cfg := sqlite.NewConfigStore(db)
+	v, err := cfg.Get(ctx, "sprint.cache_bundle_path")
+	if err != nil { // not configured yet → leave empty (template handles fallback)
+		return nil
+	}
+	if v != "" {
+		data["CacheBundlePath"] = v
+	}
 	return nil
 }
 

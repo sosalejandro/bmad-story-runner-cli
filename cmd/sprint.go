@@ -31,6 +31,7 @@ func newSprintCmd() *cobra.Command {
 		newSprintPauseCmd(),
 		newSprintResumeCmd(),
 		newSprintStatusCmd(),
+		newSprintCacheBundleCmd(),
 	)
 	addV6PersistentFlags(cmd)
 	return cmd
@@ -279,3 +280,58 @@ func printSprintTable(report map[string]any, counts, batches map[string]int, tok
 // ensure ignored import surfaces a build error if unused upstream
 var _ = strings.HasPrefix
 var _ = errors.Is
+
+// ---------- cache-bundle ----------
+
+func newSprintCacheBundleCmd() *cobra.Command {
+	var (
+		outPath  string
+		docsDir  string
+	)
+	cmd := &cobra.Command{
+		Use:   "cache-bundle",
+		Short: "Concatenate standing corpus into one file the hydrator can read once per dispatch",
+		Long: `Builds a deterministic concatenation of the v6-cutover canon docs
+(architecture, audit, supplement, decision tree, saga mapping) into a
+single file. The stage_hydrate template injects the bundle path so the
+L3 agent does one Read instead of 5+ — and the byte-identical prefix
+across sprints gives Claude Code's auto-prompt-caching a hit point on
+subsequent hydrator dispatches in the same session.
+
+Stores the bundle path in config.sprint.cache_bundle_path so future
+renders can find it automatically. Default output:
+  <docs_folder>/sprint-cache-bundle.md`,
+		RunE: func(c *cobra.Command, args []string) error {
+			ctx := context.Background()
+			db, err := openV6DB(ctx)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			cfg := sqlite.NewConfigStore(db)
+
+			if docsDir == "" {
+				v, err := cfg.Get(ctx, "docs_folder")
+				if err != nil {
+					return fmt.Errorf("cache-bundle: docs_folder not set; provide --docs or run `bmad init`")
+				}
+				docsDir = v
+			}
+			if outPath == "" {
+				outPath = filepath.Join(docsDir, "sprint-cache-bundle.md")
+			}
+
+			res, err := appsprint.BuildCacheBundle(docsDir, outPath, nil)
+			if err != nil {
+				return err
+			}
+			if err := cfg.Set(ctx, "sprint.cache_bundle_path", outPath); err != nil {
+				return fmt.Errorf("cache-bundle: persist config: %w", err)
+			}
+			return json.NewEncoder(os.Stdout).Encode(res)
+		},
+	}
+	cmd.Flags().StringVar(&outPath, "out", "", "output path (default: <docs_folder>/sprint-cache-bundle.md)")
+	cmd.Flags().StringVar(&docsDir, "docs", "", "source docs folder (default: config.docs_folder)")
+	return cmd
+}
