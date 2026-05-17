@@ -1,0 +1,331 @@
+package cmd
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"text/tabwriter"
+
+	"github.com/spf13/cobra"
+
+	appstate "github.com/sosalejandro/bmad-story-runner-cli/application/state"
+	"github.com/sosalejandro/bmad-story-runner-cli/domain/state"
+	"github.com/sosalejandro/bmad-story-runner-cli/infrastructure/state/sqlite"
+)
+
+// newStoryCmd is the parent of the `bmad story <verb>` namespace.
+func newStoryCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "story <verb>",
+		Short: "Per-story lifecycle commands (status, hydrate, next, complete, ...)",
+	}
+	cmd.AddCommand(
+		newStoryStatusCmd(),
+		newStoryHydrateCmd(),
+		newStoryNextCmd(),
+		newStoryCheckpointCmd(),
+		newStorySetStatusCmd(),
+		newStoryCompleteCmd(),
+	)
+	addV6PersistentFlags(cmd)
+	return cmd
+}
+
+// ---------- shared helpers ----------
+
+func openStoryService(ctx context.Context) (*appstate.StoryService, func(), error) {
+	db, err := openV6DB(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	svc := &appstate.StoryService{
+		Stories:      sqlite.NewStoriesStore(db),
+		Dependencies: sqlite.NewStoryDependenciesStore(db),
+		Affects:      sqlite.NewStoryAffectsStore(db),
+		Concerns:     sqlite.NewStoryConcernsStore(db),
+		RetryCounts:  sqlite.NewStoryRetryCountsStore(db),
+		Config:       sqlite.NewConfigStore(db),
+		Checkpoints:  sqlite.NewCheckpointsStore(db),
+	}
+	cleanup := func() { _ = db.Close() }
+	return svc, cleanup, nil
+}
+
+// ---------- status ----------
+
+func newStoryStatusCmd() *cobra.Command {
+	var (
+		statusFlag string
+		stageFlag  string
+		hasEnv     bool
+		hasEnvSet  bool
+	)
+	cmd := &cobra.Command{
+		Use:   "status [<story-id>]",
+		Short: "Show story status (table for many, detail for one)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			hasEnvSet = c.Flags().Changed("has-env")
+			ctx := context.Background()
+			svc, cleanup, err := openStoryService(ctx)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			if len(args) == 1 {
+				return printStoryDetail(ctx, svc, args[0])
+			}
+
+			f := state.StoryFilter{}
+			if statusFlag != "" {
+				st := state.Status(statusFlag)
+				f.Status = &st
+			}
+			if stageFlag != "" {
+				sg := state.Stage(stageFlag)
+				f.CurrentStage = &sg
+			}
+			if hasEnvSet {
+				f.HasEnv = &hasEnv
+			}
+			return printStoryTable(ctx, svc, f)
+		},
+	}
+	cmd.Flags().StringVar(&statusFlag, "status", "", "filter by status")
+	cmd.Flags().StringVar(&stageFlag, "stage", "", "filter by current stage")
+	cmd.Flags().BoolVar(&hasEnv, "has-env", false, "filter by env-up state")
+	return cmd
+}
+
+func printStoryTable(ctx context.Context, svc *appstate.StoryService, f state.StoryFilter) error {
+	rows, err := svc.Stories.List(ctx, f)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		fmt.Println("(no stories match filter)")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tSTATUS\tSTAGE\tCOMPLEXITY\tCI\tTITLE")
+	for _, st := range rows {
+		stage := "-"
+		if st.CurrentStage != nil {
+			stage = string(*st.CurrentStage)
+		}
+		ci := "n"
+		if st.CIPassed {
+			ci = "y"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			st.ID, st.Status, stage, st.Complexity, ci, st.Title)
+	}
+	return w.Flush()
+}
+
+func printStoryDetail(ctx context.Context, svc *appstate.StoryService, id string) error {
+	st, err := svc.Stories.Get(ctx, id)
+	if errors.Is(err, state.ErrNotFound) {
+		fmt.Fprintf(os.Stderr, "story %q not found\n", id)
+		os.Exit(1)
+	}
+	if err != nil {
+		return err
+	}
+	deps, _ := svc.Dependencies.Of(ctx, id)
+	affects, _ := svc.Affects.Of(ctx, id)
+	concerns, _ := svc.Concerns.Of(ctx, id)
+	retries, _ := svc.RetryCounts.Get(ctx, id)
+
+	out := map[string]any{
+		"id":               st.ID,
+		"file":             st.File,
+		"title":            st.Title,
+		"status":           st.Status,
+		"current_stage":    st.CurrentStage,
+		"complexity":       st.Complexity,
+		"parallel_group":   st.ParallelGroup,
+		"hydrated_file":    st.HydratedFile,
+		"resource_budget":  st.ResourceBudget,
+		"requires_android": st.RequiresAndroid,
+		"ci_passed":        st.CIPassed,
+		"commit_hash":      st.CommitHash,
+		"pr_url":           st.PRURL,
+		"completed_at":     st.CompletedAt,
+		"created_at":       st.CreatedAt,
+		"updated_at":       st.UpdatedAt,
+		"depends_on":       deps,
+		"affects":          affects,
+		"concerns":         concerns,
+		"retry_counts":     retries,
+	}
+	return json.NewEncoder(os.Stdout).Encode(out)
+}
+
+// ---------- hydrate ----------
+
+func newStoryHydrateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "hydrate <story-id>",
+		Short: "Mark a story as hydrating + emit the dispatch instruction",
+		Long: `Sets status=hydrating + current_stage=hydrate. Emits a one-line
+JSON instruction the orchestrator agent uses to dispatch the
+story-hydrator L3 agent. Idempotent — re-running before the L3
+agent returns produces the same instruction.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			ctx := context.Background()
+			svc, cleanup, err := openStoryService(ctx)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			id := args[0]
+			if _, err := svc.Stories.Get(ctx, id); err != nil {
+				return fmt.Errorf("hydrate %q: %w", id, err)
+			}
+			if err := svc.Stories.SetStatus(ctx, id, state.StatusHydrating); err != nil {
+				return err
+			}
+			stage := state.StageHydrate
+			if err := svc.Stories.SetCurrentStage(ctx, id, &stage); err != nil {
+				return err
+			}
+			return json.NewEncoder(os.Stdout).Encode(map[string]string{
+				"action":   "dispatch",
+				"agent":    "story-hydrator",
+				"story_id": id,
+				"stage":    string(stage),
+			})
+		},
+	}
+}
+
+// ---------- next ----------
+
+func newStoryNextCmd() *cobra.Command {
+	var max int
+	cmd := &cobra.Command{
+		Use:   "next",
+		Short: "Emit a parallel-eligible next-action batch",
+		RunE: func(c *cobra.Command, args []string) error {
+			ctx := context.Background()
+			svc, cleanup, err := openStoryService(ctx)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			actions, err := svc.Next(ctx, max)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(os.Stdout).Encode(map[string]any{
+				"max":     max,
+				"actions": actions,
+			})
+		},
+	}
+	cmd.Flags().IntVar(&max, "max-parallel", 0, "override max parallel slots (else uses config)")
+	return cmd
+}
+
+// ---------- checkpoint ----------
+
+func newStoryCheckpointCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "checkpoint <story-id>",
+		Short: "Evaluate §12.5 dual-trigger; fire a checkpoint row if triggered",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			ctx := context.Background()
+			svc, cleanup, err := openStoryService(ctx)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			res, err := svc.EvaluateCheckpoint(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(os.Stdout).Encode(res)
+		},
+	}
+}
+
+// ---------- set-status ----------
+
+func newStorySetStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "set-status <story-id> <status>",
+		Short: "Admin: directly mutate a story's status",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(c *cobra.Command, args []string) error {
+			ctx := context.Background()
+			svc, cleanup, err := openStoryService(ctx)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			id, status := args[0], state.Status(args[1])
+			if err := svc.Stories.SetStatus(ctx, id, status); err != nil {
+				return fmt.Errorf("set-status %q: %w", id, err)
+			}
+			fmt.Printf("%s -> %s\n", id, status)
+			return nil
+		},
+	}
+}
+
+// ---------- complete ----------
+
+func newStoryCompleteCmd() *cobra.Command {
+	var commit, prURL string
+	cmd := &cobra.Command{
+		Use:   "complete <story-id> [<story-id>...]",
+		Short: "Mark stories complete (variadic). --commit/--pr only meaningful for single id",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			ctx := context.Background()
+			svc, cleanup, err := openStoryService(ctx)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			if len(args) > 1 && (commit != "" || prURL != "") {
+				return fmt.Errorf("--commit / --pr are only meaningful for a single story id")
+			}
+
+			for _, id := range args {
+				if err := svc.Stories.SetComplete(ctx, id, commit, prURL); err != nil {
+					return fmt.Errorf("complete %q: %w", id, err)
+				}
+				fmt.Printf("%s -> complete\n", id)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&commit, "commit", "", "commit hash (single-id only)")
+	cmd.Flags().StringVar(&prURL, "pr", "", "PR URL (single-id only)")
+	return cmd
+}
+
+// effectiveMaxParallel mirrors the application-side logic for cmd-level use.
+func effectiveMaxParallel(v string) int {
+	if v == "" {
+		return 4
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 4
+	}
+	return n
+}

@@ -40,6 +40,7 @@ so Claude does not need to write inline Python or bash scripts.`,
 	root.AddCommand(
 		newInitCmd(),     // v6 — sqlite init
 		newConfigCmd(),   // v6 — runtime config get/set
+		newStoryCmd(),    // v6 — story namespace (status, hydrate, next, ...)
 		newStatusCmd(),
 		newSetStatusCmd(),
 		newSetCompleteCmd(),
