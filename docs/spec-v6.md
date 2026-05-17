@@ -639,104 +639,196 @@ Token rollup is queried from `dispatches` table at emit time (per §12.7).
 
 ## 5. Composable skills
 
+Two sprint-level skills (`sprint-planning`, `story-checkpoint`) plus four SRP-split infra skills replacing the proposed monolithic `test-env-isolation` (per §12.4): `port-pool`, `docker-up`, `healthcheck`, `sweeper`. The four infra skills compose under `bmad env <verb>` in `application/env/`; none knows about another.
+
 ### `sprint-planning` skill
 
-**Purpose:** Read `epics.md` → build dependency graph → produce sprint plan (ordered batches).
+**Purpose:** Read `epics.md` → build dependency graph → produce sprint plan (ordered batches written to `batches` + `batch_stories` tables).
 
 ```markdown
 ---
 name: sprint-planning
-description: "Builds a sprint dependency graph + ordered batch plan from epics.md. Honors per-story depends_on + file-overlap + parallel cap. Use when starting a new sprint or planning a re-batch after blockers."
+description: "Builds a sprint dependency graph + ordered batch plan from epics.md. Honors per-story depends_on + file-overlap + parallel cap. Persists to SQLite batches table. Use when starting a new sprint or planning a re-batch after blockers."
 tools: Bash, Read
 ---
 
 # Sprint Planning
 
-INPUT: path to epics.md + max-parallel + per-repo file-overlap conventions
+INPUT: path to epics.md + max_parallel + per-repo file-overlap conventions
 
 PROTOCOL:
-1. Parse epics.md → extract stories + frontmatter (depends_on, affects, resource_budget, requires_android)
-2. Build directed dependency graph
-3. Topo-sort respecting deps
-4. Within each topo level: group by NON-overlapping file sets (use `affects:` frontmatter or per-BC heuristic)
-5. Apply parallel cap per batch
-6. Mobile serialization: stories with `requires_android: true` get their own batch (or share with non-mobile if not Android-bound)
-7. Resource budget sanity-check: per batch, sum resource_budget; warn if exceeds system max
-8. Return plan JSON: { batches: [[story_ids], ...], total_stories, estimated_duration }
-
-OUTPUT: Sprint plan JSON; orchestrator consumes via CLI cache (`bmad sprint-plan apply`).
+1. Parse epics.md → extract stories + frontmatter (depends_on, affects, resource_budget, requires_android, complexity)
+2. CLI: bmad story status (load existing story rows; idempotent — re-planning preserves IDs)
+3. Build directed dependency graph from depends_on (read from story_dependencies table)
+4. Topo-sort respecting deps
+5. Within each topo level: group by NON-overlapping file sets (use story_affects table)
+6. Apply parallel cap per batch
+7. Mobile serialization: stories with requires_android = 1 get their own batch (or share only with non-android stories)
+8. Resource budget sanity-check per batch — sum ram_mb + cpu_cores; warn if exceeds system_check max
+9. Persist via CLI: bmad sprint plan --assign-groups <N> (writes batches + batch_stories rows)
+10. Return plan JSON: { batches: [[story_ids], ...], total_stories, estimated_duration }
 ```
 
-### `story-checkpoint` skill
+### `story-checkpoint` skill (dual-trigger per §12.5)
 
-**Purpose:** Mid-sprint review — summarize last N stories + assess drift + present user options.
+**Purpose:** Mid-sprint review on either count OR complexity trigger. Summarizes since-last-checkpoint stories, assesses drift, presents continue/adjust/halt options.
 
 ```markdown
 ---
 name: story-checkpoint
-description: "Mid-sprint review after N stories. Summarizes last batch, assesses drift, presents continue/adjust/halt options. Use when orchestrator hits checkpoint-after-stories threshold."
+description: "Mid-sprint review fired by §12.5 dual trigger (count threshold OR completed story with complexity=high). Summarizes drift, presents continue/adjust/halt options. Invoked via `bmad story checkpoint <story-id>` evaluation step."
 tools: Bash, Read
 ---
 
 # Story Checkpoint
 
-INPUT: progress-json path + last-N-stories-completed
+INPUT (required):
+- checkpoint_id     — INTEGER from checkpoints table (unresolved row to render summary for)
+- checkpoint_reason — "count" | "complexity:<story-id>"  (passed in for foregrounding the right detail)
 
 PROTOCOL:
-1. CLI: bmad status (current overall)
-2. For each of last N stories:
-   - Read hydrated_file's progress markers + commit hash + PR URL
-   - Note: any stages that exceeded retry budget? Any QA concerns appended?
-3. Drift assessment:
-   - Did any story's implementation deviate from its hydrated spec? (heuristic: check commit message vs story title; check files modified vs `affects:`)
-   - Did any story introduce changes that affect upstream story dependencies?
-4. Summary report:
-   - N stories completed
-   - X stories blocked + reasons
-   - Y total commits
-   - Z total PRs
-   - Drift signals: [...]
-5. HALT with user prompt: continue | adjust epic plan | halt sprint
-6. User response → CLI: bmad sprint-resume (continue) OR bmad sprint-pause (adjust/halt)
+1. CLI: bmad sprint status (overall snapshot)
+2. CLI: bmad story status --since-last-checkpoint (list completed + blocked since checkpoint_id-1)
+3. For each story in that set:
+   - Pull commit_hash + pr_url + retry_counts from SQLite
+   - Compute drift signals:
+       * commit message subject vs story title: similarity score
+       * files modified (git show --stat) vs story_affects rows: overlap ratio
+       * downstream-dependency impact: did this story modify files in any other story's affects list?
+4. Compose summary:
+   - reason = checkpoint_reason  (foreground "complexity:9.3 just landed" or "4 stories since last checkpoint")
+   - completed_count, blocked_count
+   - drift_signals: [{ story_id, signal, severity }, ...]
+   - tokens spent since last checkpoint (SUM from dispatches)
+   - PRs opened / merged
+5. HALT — emit to user (Markdown), wait for response: `continue` | `adjust` | `halt`
+6. User response → CLI: bmad sprint resume (continue) OR bmad sprint pause (adjust/halt)
+   (CLI writes checkpoints.user_decision + decided_at)
 ```
 
-### `test-env-isolation` skill (system-wide; promote to `~/.claude/skills/`)
+---
 
-**Purpose:** Cross-project skill providing port-pool + Docker scripts for per-story test infrastructure.
+### `port-pool` skill (infra split — §12.4)
+
+**Purpose:** Allocate / release port blocks from `.bmad-test-env.yml` `port_range`. Persists to `env_allocations` table. Knows nothing about Docker.
 
 ```markdown
 ---
-name: test-env-isolation
-description: "Per-story test infrastructure isolation via Docker. Provides port-pool allocation + docker-compose up/down + cleanup scripts. Requires per-repo .bmad-test-env.yml. Use when story-runner needs isolated DB/Redis/OTel infra per parallel story."
+name: port-pool
+description: "Allocate and release port blocks for per-story test envs. Persists allocations in SQLite env_allocations table. Reads port_range + ports_per_story from .bmad-test-env.yml. Cross-project."
+tools: Bash, Read
+---
+
+# Port Pool
+
+PROTOCOL (allocate):
+1. Read .bmad-test-env.yml → port_range, ports_per_story
+2. CLI: bmad env status --raw → list of in-use ports (from env_allocations where reclaimed_at IS NULL)
+3. Find next free contiguous block of size ports_per_story within port_range
+4. CLI: bmad env up --reserve <story_id> --ports <p1,p2,...> (writes env_allocations row; status=reserved)
+5. Return { pg_port, redis_port, otel_port, db_name }
+
+PROTOCOL (release):
+1. CLI: bmad env down --release <story_id> --reason <completed|stale|manual>
+   (sets env_allocations.reclaimed_at + reclaim_reason)
+2. Return success
+```
+
+### `docker-up` skill (infra split — §12.4)
+
+**Purpose:** Render `.env.test` from allocated ports + `.bmad-test-env.yml`. Run `docker-compose up -d` with labels.
+
+```markdown
+---
+name: docker-up
+description: "Render .env.test from port-pool allocation + .bmad-test-env.yml; bring up docker-compose with [bmad-test-env]-<story> labels. Knows nothing about port allocation or healthchecks."
 tools: Bash, Read, Write
 ---
 
-# Test-Env Isolation (cross-project)
+# Docker Up
 
-INPUT: story_id + path to .bmad-test-env.yml
+INPUT: story_id + env_config (from port-pool) + path to docker-compose.test.yml
 
-PROTOCOL (env up):
-1. Read .bmad-test-env.yml → port_range + services + resource_limits
-2. CLI: bmad worktree create <story_id> → worktree_path
-3. CLI port-pool: allocate next ports_per_story block from range
-4. Render env: write .env.test in worktree with PG_PORT=, REDIS_PORT=, OTEL_PORT=, DB_NAME=story_<id>
-5. Bash: docker-compose -f docker-compose.test.yml --env-file .env.test up -d
-6. Wait for healthchecks (timeout per service)
-7. Tag containers with [bmad-test-env]-<story_id>
-8. Return env_config JSON: { worktree_path, pg_port, redis_port, otel_port, db_name, container_ids }
-
-PROTOCOL (env down):
-1. Bash: docker-compose -f docker-compose.test.yml --env-file .env.test down -v
-2. CLI port-pool: release ports back
-3. CLI worktree destroy <story_id> (optional — orchestrator may keep worktree for PR)
-4. Return success/failure
-
-PROTOCOL (cleanup-orphans):
-1. Bash: docker ps -a --filter "label=bmad-test-env"
-2. For each: check age (creation time vs threshold from .bmad-test-env.yml)
-3. If older than orphan_age_hours: down + remove
-4. Return: orphans cleaned count
+PROTOCOL:
+1. Read .bmad-test-env.yml → services + image set + resource_limits
+2. Write .env.test in worktree:
+     PG_PORT=<pg_port>
+     REDIS_PORT=<redis_port>
+     OTEL_PORT=<otel_port>
+     DB_NAME=story_<story_id_underscored>
+3. Bash: docker-compose -f docker-compose.test.yml --env-file .env.test up -d
+   --label bmad-test-env=<story_id>
+4. Capture container_ids from `docker-compose ps -q`
+5. CLI: bmad env up --record-containers <story_id> --ids <c1,c2,c3>
+   (writes env_allocations.container_ids)
+6. Return { container_ids }
 ```
+
+### `healthcheck` skill (infra split — §12.4)
+
+**Purpose:** Poll service healthchecks until ready or timeout. Per-service timeouts from `.bmad-test-env.yml`.
+
+```markdown
+---
+name: healthcheck
+description: "Poll healthchecks for each service from .bmad-test-env.yml. Per-service timeout. Returns when all green, or fails with which service(s) timed out. Knows nothing about Docker lifecycle."
+tools: Bash, Read
+---
+
+# Healthcheck
+
+INPUT: story_id + env_config + path to .bmad-test-env.yml
+
+PROTOCOL:
+1. Read .bmad-test-env.yml → services[].healthcheck + per-service timeout
+2. For each service in parallel:
+   - Run healthcheck.test command (e.g., `pg_isready -h localhost -p <pg_port>`)
+   - Poll every 1s until success or per-service timeout
+3. Aggregate:
+   - All green → return ok
+   - One+ timed out → return failed_services: [{ name, timeout_s, last_error }]
+4. CLI: bmad env up --mark-healthy <story_id>  (only on success)
+```
+
+### `sweeper` skill (infra split — §12.4 / §12.6)
+
+**Purpose:** Activity-based stale-env detection. Probes worktree filesystem + git + dispatch return docs; tears down stale envs.
+
+```markdown
+---
+name: sweeper
+description: "Activity-based stale-env sweeper per §12.6. Probes worktree mtimes + git activity + dispatch return docs. Tears down envs with no activity beyond config.env.stale_threshold_minutes. Knows nothing about port allocation or healthchecks."
+tools: Bash, Read
+---
+
+# Sweeper
+
+INPUT: optional --threshold-minutes <N> override (else read from config table)
+
+PROTOCOL:
+1. CLI: bmad env status --raw → list active envs (env_allocations.reclaimed_at IS NULL)
+2. CLI: bmad config get env.stale_threshold_minutes → threshold (default 120)
+3. For each active env:
+   a. Activity probe (any ONE counts as "alive"):
+      - find <worktree_path> -type f -newermt "<now - threshold>m" | head -1
+      - git -C <worktree_path> log --since "<threshold>m ago" --oneline | head -1
+      - SELECT MAX(returned_at) FROM dispatches WHERE story_id=? AND returned_at > <now - threshold>m
+   b. If NO activity within threshold → stale
+4. For each stale:
+   - Bash: docker-compose -f docker-compose.test.yml --env-file <worktree>/.env.test down -v
+   - CLI: bmad env down --release <story_id> --reason stale
+5. Return: { swept: [<story_id>], kept: [<story_id>] }
+```
+
+### Composition
+
+`bmad env up <story>` is implemented in `application/env/up.go` and orchestrates:
+
+```text
+port-pool.allocate(story) → docker-up.bringUp(story, env_config) → healthcheck.poll(story, env_config)
+```
+
+with try/rollback semantics — if `docker-up` fails, releases port-pool allocation; if `healthcheck` fails, runs `docker-up.tearDown` + releases port-pool. Each skill is independently testable; the composition logic is one focused file.
 
 ## 6. L3 agent inventory (UNCHANGED from PR #337)
 
