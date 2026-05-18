@@ -115,6 +115,23 @@ func seedOptionalSlots(template string, data map[string]any) {
 		setDefault(data, "PriorAttempt", (*struct{})(nil))
 		setDefault(data, "IdempotencyKey", "")
 	}
+	// Issue #17: doc-only / architectural-decision stories don't need a test
+	// environment. EnvConfig is now optional on the stages that previously
+	// required it; a zero/missing EnvConfig collapses the rendered prompt's
+	// "Test environment" block entirely.
+	//
+	// Two cases the caller might create:
+	//   (a) EnvConfig missing entirely → seed an all-zero map so
+	//       `{{.EnvConfig.PgPort}}` resolves under missingkey=error
+	//   (b) EnvConfig present as a partial map → backfill the missing
+	//       port keys with 0 so `{{if .EnvConfig.RedisPort}}` is false
+	//       instead of erroring
+	// Typed-struct callers (`type envCfg struct{ PgPort, RedisPort int }`)
+	// don't need this treatment — missing struct fields are zero, not errors.
+	switch template {
+	case "stage_implement", "stage_atdd", "stage_automate", "stage_test_review", "stage_code_review":
+		ensureEnvConfigKeys(data)
+	}
 	switch template {
 	case "stage_hydrate":
 		setDefault(data, "CacheBundlePath", "")
@@ -130,5 +147,34 @@ func seedOptionalSlots(template string, data map[string]any) {
 func setDefault(m map[string]any, key string, value any) {
 	if _, ok := m[key]; !ok {
 		m[key] = value
+	}
+}
+
+// ensureEnvConfigKeys backfills .EnvConfig's port-keys with zero values so
+// the stage_* templates can use `{{if .EnvConfig.PgPort}}` under
+// missingkey=error without erroring on a partial map.
+//
+// Only acts when EnvConfig is already a map[string]any (or absent). If the
+// caller passed a typed struct, leave it alone — struct field access doesn't
+// trip missingkey=error.
+func ensureEnvConfigKeys(data map[string]any) {
+	existing, ok := data["EnvConfig"]
+	if !ok {
+		data["EnvConfig"] = map[string]any{
+			"PgPort": 0, "RedisPort": 0, "OtelPort": 0, "DbName": "",
+		}
+		return
+	}
+	m, isMap := existing.(map[string]any)
+	if !isMap {
+		return // typed struct or other shape — caller takes responsibility
+	}
+	for _, k := range []string{"PgPort", "RedisPort", "OtelPort"} {
+		if _, present := m[k]; !present {
+			m[k] = 0
+		}
+	}
+	if _, present := m["DbName"]; !present {
+		m["DbName"] = ""
 	}
 }

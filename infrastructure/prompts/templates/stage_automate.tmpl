@@ -2,7 +2,8 @@
        .StoryID         (string)   required
        .HydratedFile    (string)   required
        .Mode            (string)   required (always "strict" for this stage)
-       .EnvConfig       (struct)   required
+       .EnvConfig       (struct)   optional — block omitted entirely
+                                    when no port is set (issue #17)
        .PriorAttempt    (*struct)  optional
        .IdempotencyKey  (string)   optional
 */}}
@@ -15,13 +16,19 @@ coverage that ATDD's high-level focus missed.
 
 Hydrated spec: `{{.HydratedFile}}`
 
+{{if or .EnvConfig.PgPort .EnvConfig.RedisPort .EnvConfig.OtelPort -}}
 ## Test environment (already up)
 
+{{if .EnvConfig.PgPort -}}
 - Postgres :{{.EnvConfig.PgPort}} (db: `{{.EnvConfig.DbName}}`)
+{{end -}}
+{{if .EnvConfig.RedisPort -}}
 - Redis :{{.EnvConfig.RedisPort}}
+{{end -}}
 {{if .EnvConfig.OtelPort -}}
 - OTEL :{{.EnvConfig.OtelPort}}
-{{- end}}
+{{end -}}
+{{end}}
 
 {{if .PriorAttempt -}}
 ## Prior attempt summary

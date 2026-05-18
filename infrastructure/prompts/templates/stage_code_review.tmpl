@@ -2,7 +2,8 @@
        .StoryID         (string)   required
        .HydratedFile    (string)   required
        .Mode            (string)   required — pragmatic | strict
-       .EnvConfig       (struct)   required
+       .EnvConfig       (struct)   optional — block omitted entirely
+                                    when no port is set (issue #17)
        .Iteration       (int)      required — review iteration #; 1 for first pass
        .MaxIterations   (int)      required — max_review_iterations from config
        .PriorAttempt    (*struct)  optional
@@ -25,9 +26,11 @@ PRAGMATIC: 1 round + advisory findings. Surface issues; do NOT block
 unless they're show-stoppers.
 {{- end}}
 
+{{if .EnvConfig.PgPort -}}
 ## Test environment
 
 - Postgres :{{.EnvConfig.PgPort}} (db: `{{.EnvConfig.DbName}}`)
+{{end}}
 
 {{if .PriorAttempt -}}
 ## Prior attempt summary
