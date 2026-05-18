@@ -294,6 +294,17 @@ func newSprintStatusCmd() *cobra.Command {
 			paused, _ := cfg.Get(ctx, sprintPausedKey)
 			mode, _ := cfg.Get(ctx, "mode")
 
+			// Issue #15: surface the 4-axis breakdown + cache_hit_rate so
+			// downstream dashboards can see cache health at a glance.
+			tokenBreakdown := map[string]any{
+				"input":           tokens.Input,
+				"output":          tokens.Output,
+				"cache_read":      tokens.CacheRead,
+				"cache_create":    tokens.CacheCreate,
+				"total":           tokens.Input + tokens.Output + tokens.CacheRead + tokens.CacheCreate,
+				"cache_hit_rate":  cacheHitRate(tokens),
+			}
+
 			report := map[string]any{
 				"mode":             mode,
 				"paused":           paused == "true",
@@ -301,7 +312,7 @@ func newSprintStatusCmd() *cobra.Command {
 				"by_status":        counts,
 				"batches":          batchSummary,
 				"unresolved_checkpoint": unresolved,
-				"tokens":           tokens,
+				"tokens":           tokenBreakdown,
 			}
 			if raw {
 				return json.NewEncoder(os.Stdout).Encode(report)
@@ -334,6 +345,8 @@ func printSprintTable(report map[string]any, counts, batches map[string]int, tok
 	fmt.Fprintf(w, "  output\t%d\n", tokens.Output)
 	fmt.Fprintf(w, "  cache read\t%d\n", tokens.CacheRead)
 	fmt.Fprintf(w, "  cache create\t%d\n", tokens.CacheCreate)
+	fmt.Fprintf(w, "  total\t%d\n", tokens.Input+tokens.Output+tokens.CacheRead+tokens.CacheCreate)
+	fmt.Fprintf(w, "  cache hit rate\t%.1f%%\n", cacheHitRate(tokens))
 	if cp, ok := report["unresolved_checkpoint"].(*state.Checkpoint); ok && cp != nil {
 		fmt.Fprintln(w, "")
 		fmt.Fprintln(w, "UNRESOLVED CHECKPOINT — run `bmad sprint resume` after deciding")
