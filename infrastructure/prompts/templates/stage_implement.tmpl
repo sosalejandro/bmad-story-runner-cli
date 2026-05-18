@@ -45,6 +45,32 @@ already consumed this file; if you need quick reminders of the spec's
 {{.EpicContext}}
 {{- end}}
 
+## Codebase discovery — prefer atlas CLI over grep
+
+The `atlas` binary is on PATH (pinned at v0.1.0 in nutrition's
+`taskfiles/atlas.yml`). For ad-hoc codebase queries during
+implementation, prefer the indexed atlas verbs over `grep` / `find`:
+
+```
+atlas codebase find <symbol>       — file:line for a qualified name
+atlas codebase bc <bc-name>        — annotations + symbols within a BC
+atlas codebase agg <aggregate-id>  — aggregate decl + canonical service
+atlas codebase emit <event-name>   — emit + outbox-publish sites
+atlas codebase pattern <name>      — symbols matching a parser recognizer
+                                     (outbox-append / event-recorder-embed /
+                                      canonical-service)
+atlas trace <feature-or-symbol>    — graph walk
+atlas trace saga:<id>              — ordered saga steps
+atlas diagnose "<symptom>"         — symptom → symbol matcher
+```
+
+Each verb supports `--json` for programmatic output. `atlas --help` for
+full verb listing. The atlas state DB is at `.atlas/atlas.db`
+(gitignored). Note: `atlas trace` takes a Go SymbolID (e.g.
+`PatientService.AssignPatient`), not a feature-id (`plans-patient.export-pdf`)
+— use `atlas codebase find` to resolve a feature ID's primary symbol
+first.
+
 ## What to do
 
 1. Read the hydrated spec at `{{.HydratedFile}}`.
