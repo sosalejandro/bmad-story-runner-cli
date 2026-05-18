@@ -41,12 +41,30 @@ func newSprintCmd() *cobra.Command {
 
 func newSprintPlanCmd() *cobra.Command {
 	var (
-		epicsPath string
-		maxP      int
+		epicsPath        string
+		maxP             int
+		scope            string
+		allowDepsMissing bool
 	)
 	cmd := &cobra.Command{
 		Use:   "plan",
 		Short: "Parse epics.md → ingest stories + dependencies + build batches",
+		Long: `Reads epics.md, ingests stories + dependencies + affects rows, and
+builds a deterministic batch plan respecting topo order, file-overlap
+disjointness, and android-serialization.
+
+Safety rails (issue #14):
+  --scope <epic-id>          Restrict batching to one epic (e.g. --scope 1
+                              picks 1.1, 1.2, …; 10.* is excluded). Useful
+                              when only one epic has full frontmatter and
+                              the rest still needs backfilling.
+
+  --allow-deps-missing       Bypass the partial-coverage warning. By default,
+                              ` + "`bmad sprint plan`" + ` refuses to proceed if any
+                              parsed story lacks YAML frontmatter — without
+                              ` + "`depends_on:`" + ` such stories collapse to topo-level-0
+                              and would be dispatched alongside true Epic-1
+                              top-level work (cross-epic batching bug).`,
 		RunE: func(c *cobra.Command, args []string) error {
 			ctx := context.Background()
 			db, err := openV6DB(ctx)
@@ -67,6 +85,37 @@ func newSprintPlanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			// Apply --scope filter FIRST so coverage analysis only flags
+			// in-scope stories. A scope restricted to a fully-annotated
+			// epic should not warn on un-annotated epics outside scope.
+			totalBeforeScope := len(parsed)
+			if scope != "" {
+				parsed = appsprint.FilterByScope(parsed, scope)
+				if len(parsed) == 0 {
+					return fmt.Errorf("sprint plan: --scope %q matched zero stories in %s", scope, epicsPath)
+				}
+			}
+
+			// Partial-coverage safety check (issue #14, fix #1).
+			coverage := appsprint.AnalyseCoverage(parsed)
+			if coverage.WithoutFrontmatter > 0 && !allowDepsMissing {
+				preview := coverage.UnannotatedStoryIDs
+				if len(preview) > 8 {
+					preview = preview[:8]
+				}
+				fmt.Fprintf(os.Stderr,
+					"WARN: %d of %d stories have no frontmatter — they'll be treated as topo-level-0.\n"+
+						"      Affected (first %d): %s%s\n"+
+						"      Use --allow-deps-missing to proceed anyway, OR backfill frontmatter first.\n"+
+						"      Tip: --scope <epic-id> restricts to one annotated epic.\n",
+					coverage.WithoutFrontmatter, coverage.TotalStories,
+					len(preview), strings.Join(preview, ", "),
+					moreSuffix(coverage.UnannotatedStoryIDs, preview),
+				)
+				return fmt.Errorf("sprint plan: refusing to plan with %d un-annotated stories (use --allow-deps-missing to override)", coverage.WithoutFrontmatter)
+			}
+
 			if maxP <= 0 {
 				if v, err := cfg.Get(ctx, "max_parallel"); err == nil {
 					if n, _ := strconv.Atoi(v); n > 0 {
@@ -88,12 +137,27 @@ func newSprintPlanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if scope != "" {
+				res.Scope = scope
+				res.StoriesSkippedByScope = totalBeforeScope - len(parsed)
+			}
 			return json.NewEncoder(os.Stdout).Encode(res)
 		},
 	}
 	cmd.Flags().StringVar(&epicsPath, "epics", "", "epics.md path (default: <docs_folder>/epics.md)")
 	cmd.Flags().IntVar(&maxP, "max-parallel", 0, "override max parallel slots per batch")
+	cmd.Flags().StringVar(&scope, "scope", "", "restrict planning to one epic id (e.g. 1 → only 1.* stories)")
+	cmd.Flags().BoolVar(&allowDepsMissing, "allow-deps-missing", false, "bypass the partial-frontmatter coverage check (issue #14)")
 	return cmd
+}
+
+// moreSuffix renders " (+N more)" when the preview slice is shorter than the
+// full list; empty string otherwise.
+func moreSuffix(full, shown []string) string {
+	if len(full) <= len(shown) {
+		return ""
+	}
+	return fmt.Sprintf(" (+%d more)", len(full)-len(shown))
 }
 
 // ---------- run ----------
@@ -230,6 +294,17 @@ func newSprintStatusCmd() *cobra.Command {
 			paused, _ := cfg.Get(ctx, sprintPausedKey)
 			mode, _ := cfg.Get(ctx, "mode")
 
+			// Issue #15: surface the 4-axis breakdown + cache_hit_rate so
+			// downstream dashboards can see cache health at a glance.
+			tokenBreakdown := map[string]any{
+				"input":           tokens.Input,
+				"output":          tokens.Output,
+				"cache_read":      tokens.CacheRead,
+				"cache_create":    tokens.CacheCreate,
+				"total":           tokens.Input + tokens.Output + tokens.CacheRead + tokens.CacheCreate,
+				"cache_hit_rate":  cacheHitRate(tokens),
+			}
+
 			report := map[string]any{
 				"mode":             mode,
 				"paused":           paused == "true",
@@ -237,7 +312,7 @@ func newSprintStatusCmd() *cobra.Command {
 				"by_status":        counts,
 				"batches":          batchSummary,
 				"unresolved_checkpoint": unresolved,
-				"tokens":           tokens,
+				"tokens":           tokenBreakdown,
 			}
 			if raw {
 				return json.NewEncoder(os.Stdout).Encode(report)
@@ -270,6 +345,8 @@ func printSprintTable(report map[string]any, counts, batches map[string]int, tok
 	fmt.Fprintf(w, "  output\t%d\n", tokens.Output)
 	fmt.Fprintf(w, "  cache read\t%d\n", tokens.CacheRead)
 	fmt.Fprintf(w, "  cache create\t%d\n", tokens.CacheCreate)
+	fmt.Fprintf(w, "  total\t%d\n", tokens.Input+tokens.Output+tokens.CacheRead+tokens.CacheCreate)
+	fmt.Fprintf(w, "  cache hit rate\t%.1f%%\n", cacheHitRate(tokens))
 	if cp, ok := report["unresolved_checkpoint"].(*state.Checkpoint); ok && cp != nil {
 		fmt.Fprintln(w, "")
 		fmt.Fprintln(w, "UNRESOLVED CHECKPOINT — run `bmad sprint resume` after deciding")

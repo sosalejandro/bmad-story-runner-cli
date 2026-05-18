@@ -152,6 +152,7 @@ func newDispatchRecordCmd() *cobra.Command {
 		outputTokens int64
 		cacheRead    int64
 		cacheCreate  int64
+		totalTokens  int64
 		model        string
 		durationMS   int64
 		idemKey      string
@@ -168,7 +169,14 @@ func newDispatchRecordCmd() *cobra.Command {
   bmad dispatch record <story-id> <stage> <status>
     Legacy form that inserts a fresh row without key. Useful for
     one-off records (e.g. manual entries); does NOT participate in
-    crash-recovery reconciliation.`,
+    crash-recovery reconciliation.
+
+Token accounting (issue #15): pass the four breakdown axes
+(--input-tokens, --output-tokens, --cache-read-tokens,
+--cache-create-tokens) when the subagent's <usage> block provides
+them — this is what powers the cache_hit_rate column in
+` + "`bmad sprint status`" + `. ` + "`--total-tokens`" + ` is kept for backward compat:
+provide either form, or both (the latter validates the sum).`,
 		Args: cobra.MaximumNArgs(3),
 		RunE: func(c *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -179,6 +187,24 @@ func newDispatchRecordCmd() *cobra.Command {
 			defer db.Close()
 			store := sqlite.NewDispatchesStore(db)
 			now := time.Now().UTC()
+
+			// Issue #15: reconcile --total-tokens with the 4-axis breakdown.
+			totalProvided := c.Flags().Changed("total-tokens")
+			breakdownProvided := c.Flags().Changed("input-tokens") ||
+				c.Flags().Changed("output-tokens") ||
+				c.Flags().Changed("cache-read-tokens") ||
+				c.Flags().Changed("cache-create-tokens")
+			reconciled, rerr := reconcileTokenInputs(
+				totalProvided, breakdownProvided,
+				totalTokens, inputTokens, outputTokens, cacheRead, cacheCreate,
+			)
+			if rerr != nil {
+				return fmt.Errorf("dispatch record: %w", rerr)
+			}
+			inputTokens = reconciled.Input
+			outputTokens = reconciled.Output
+			cacheRead = reconciled.CacheRead
+			cacheCreate = reconciled.CacheCreate
 
 			// Key-based form (preferred).
 			if idemKey != "" {
@@ -256,9 +282,46 @@ func newDispatchRecordCmd() *cobra.Command {
 	cmd.Flags().Int64Var(&outputTokens, "output-tokens", 0, "output token count")
 	cmd.Flags().Int64Var(&cacheRead, "cache-read-tokens", 0, "cache-read token count")
 	cmd.Flags().Int64Var(&cacheCreate, "cache-create-tokens", 0, "cache-create token count")
+	cmd.Flags().Int64Var(&totalTokens, "total-tokens", 0, "deprecated: total tokens (use the 4 breakdown flags instead; issue #15)")
 	cmd.Flags().StringVar(&model, "model", "", "model identifier")
 	cmd.Flags().Int64Var(&durationMS, "duration-ms", 0, "dispatch wall-clock duration in ms")
 	return cmd
+}
+
+// cacheHitRate returns cache_read / (input + cache_read) as a percentage
+// (0..100, float64). Returns 0 when the denominator is 0.
+func cacheHitRate(t state.TokenCounts) float64 {
+	denom := t.Input + t.CacheRead
+	if denom <= 0 {
+		return 0
+	}
+	return float64(t.CacheRead) / float64(denom) * 100.0
+}
+
+// reconcileTokenInputs decides what (input, output, cache-read, cache-create)
+// to persist given the flags the caller actually set.
+//
+// Issue #15: --total-tokens stays available for backward compat. Legacy
+// callers that pass only --total-tokens get their value bucketed into
+// input_tokens so cumulative dashboards still reflect cost; cache_hit_rate
+// reads 0 until they upgrade to the breakdown flags. If both forms are
+// provided, the sum MUST match — that's the contract the L1 orchestrator
+// relies on to confirm its <usage> parse is correct.
+func reconcileTokenInputs(
+	totalProvided, breakdownProvided bool,
+	total, input, output, cacheRead, cacheCreate int64,
+) (state.TokenCounts, error) {
+	sum := input + output + cacheRead + cacheCreate
+	switch {
+	case totalProvided && breakdownProvided:
+		if total != sum {
+			return state.TokenCounts{}, fmt.Errorf("--total-tokens=%d ≠ input+output+cache-read+cache-create=%d (provide one or the other, or make them agree)",
+				total, sum)
+		}
+	case totalProvided && !breakdownProvided:
+		input = total
+	}
+	return state.TokenCounts{Input: input, Output: output, CacheRead: cacheRead, CacheCreate: cacheCreate}, nil
 }
 
 // agentRoleForStage returns the canonical L3 agent name for a stage.

@@ -100,4 +100,111 @@ Body without frontmatter — should still parse to a stub story.
 	if stories[0].Frontmatter.StoryID != "9.9" {
 		t.Errorf("StoryID = %q, want 9.9 from header", stories[0].Frontmatter.StoryID)
 	}
+	if stories[0].HasFrontmatter {
+		t.Errorf("HasFrontmatter = true; want false for a header-only story (issue #14)")
+	}
+}
+
+// HasFrontmatter must be true when YAML was actually parsed — this lets the
+// coverage warning distinguish "no frontmatter" from "frontmatter present but
+// depends_on empty (top-level on purpose)". Issue #14.
+func TestParseEpicsFile_HasFrontmatterFlagSetOnYAML(t *testing.T) {
+	t.Parallel()
+	path := writeEpics(t, `### Story 1.1: With FM
+
+---
+story_id: "1.1"
+depends_on: []
+---
+
+### Story 9.9: Without FM
+`)
+	stories, _ := sprint.ParseEpicsFile(path)
+	if len(stories) != 2 {
+		t.Fatalf("len = %d, want 2", len(stories))
+	}
+	if !stories[0].HasFrontmatter {
+		t.Errorf("story 1.1: HasFrontmatter = false; want true (YAML block present)")
+	}
+	if stories[1].HasFrontmatter {
+		t.Errorf("story 9.9: HasFrontmatter = true; want false (no YAML)")
+	}
+}
+
+func TestEpicIDFromStory(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ in, want string }{
+		{"1.1", "1"},
+		{"10.4", "10"},
+		{"1", "1"},                                  // no dot → return input
+		{"4.1.payment-method-mgmt", "4"},            // multi-dot
+		{"plans-patient.export-pdf", "plans-patient"}, // slug id
+	} {
+		if got := sprint.EpicIDFromStory(tc.in); got != tc.want {
+			t.Errorf("EpicIDFromStory(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestStoryMatchesEpic_PrefixDotBoundary(t *testing.T) {
+	t.Parallel()
+	// The "1" vs "10" off-by-one prefix bug: a naive HasPrefix("10.1", "1")
+	// would match incorrectly. We require either equality or "<epic>.".
+	cases := []struct {
+		story, epic string
+		want        bool
+	}{
+		{"1.1", "1", true},
+		{"1.2", "1", true},
+		{"1", "1", true},
+		{"10.1", "1", false}, // critical: must NOT match
+		{"10.1", "10", true},
+		{"2.1", "1", false},
+		{"4.1.payment-method-mgmt", "4", true},
+		{"x.1", "", true}, // empty scope = no filter
+	}
+	for _, tc := range cases {
+		if got := sprint.StoryMatchesEpic(tc.story, tc.epic); got != tc.want {
+			t.Errorf("StoryMatchesEpic(%q, %q) = %v, want %v", tc.story, tc.epic, got, tc.want)
+		}
+	}
+}
+
+func TestAnalyseCoverage_FlagsUnannotated(t *testing.T) {
+	t.Parallel()
+	parsed := []sprint.ParsedStory{
+		{Frontmatter: sprint.StoryFrontmatter{StoryID: "1.1"}, HasFrontmatter: true},
+		{Frontmatter: sprint.StoryFrontmatter{StoryID: "1.2"}, HasFrontmatter: true},
+		{Frontmatter: sprint.StoryFrontmatter{StoryID: "10.1"}, HasFrontmatter: false},
+		{Frontmatter: sprint.StoryFrontmatter{StoryID: "10.2"}, HasFrontmatter: false},
+	}
+	r := sprint.AnalyseCoverage(parsed)
+	if r.TotalStories != 4 || r.WithFrontmatter != 2 || r.WithoutFrontmatter != 2 {
+		t.Fatalf("coverage = %+v, want 4/2/2", r)
+	}
+	if len(r.UnannotatedStoryIDs) != 2 || r.UnannotatedStoryIDs[0] != "10.1" {
+		t.Errorf("UnannotatedStoryIDs = %v", r.UnannotatedStoryIDs)
+	}
+}
+
+func TestFilterByScope_RestrictsToOneEpic(t *testing.T) {
+	t.Parallel()
+	parsed := []sprint.ParsedStory{
+		{Frontmatter: sprint.StoryFrontmatter{StoryID: "1.1"}},
+		{Frontmatter: sprint.StoryFrontmatter{StoryID: "1.2"}},
+		{Frontmatter: sprint.StoryFrontmatter{StoryID: "10.1"}}, // off-by-one trap
+		{Frontmatter: sprint.StoryFrontmatter{StoryID: "2.1"}},
+	}
+	got := sprint.FilterByScope(parsed, "1")
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2 (1.1 + 1.2 only)", len(got))
+	}
+	if got[0].Frontmatter.StoryID != "1.1" || got[1].Frontmatter.StoryID != "1.2" {
+		t.Errorf("filtered ids = %q,%q; want 1.1,1.2",
+			got[0].Frontmatter.StoryID, got[1].Frontmatter.StoryID)
+	}
+	// Empty scope leaves slice intact.
+	if all := sprint.FilterByScope(parsed, ""); len(all) != 4 {
+		t.Errorf("empty scope dropped stories: got %d, want 4", len(all))
+	}
 }

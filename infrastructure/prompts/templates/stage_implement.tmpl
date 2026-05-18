@@ -2,7 +2,10 @@
        .StoryID                 (string)   required
        .HydratedFile            (string)   required — path on disk
        .Mode                    (string)   required — pragmatic | strict
-       .EnvConfig               (struct)   required — {PgPort, RedisPort, OtelPort, DbName}
+       .EnvConfig               (struct)   optional — {PgPort, RedisPort, OtelPort, DbName}.
+                                            Empty/zero for doc-only or architectural-decision
+                                            stories — the "Test environment" block is then
+                                            omitted entirely (issue #17).
        .StoryContextBundlePath  (string)   optional — per-story curated bundle.
                                            Auto-populated when
                                            _bmad-output/context-bundles/<id>.md
@@ -25,13 +28,19 @@ already consumed this file; if you need quick reminders of the spec's
 "why" without re-reading the full hydrated file, skim here.
 {{- end}}
 
+{{if or .EnvConfig.PgPort .EnvConfig.RedisPort .EnvConfig.OtelPort -}}
 ## Test environment (already up — do NOT recreate)
 
+{{if .EnvConfig.PgPort -}}
 - PostgreSQL on `:{{.EnvConfig.PgPort}}`  (db: `{{.EnvConfig.DbName}}`)
+{{end -}}
+{{if .EnvConfig.RedisPort -}}
 - Redis on `:{{.EnvConfig.RedisPort}}`
+{{end -}}
 {{if .EnvConfig.OtelPort -}}
 - OTEL on `:{{.EnvConfig.OtelPort}}`
-{{- end}}
+{{end -}}
+{{end}}
 
 {{if .PriorAttempt -}}
 ## Prior attempt summary
