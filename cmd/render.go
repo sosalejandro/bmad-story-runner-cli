@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/spf13/cobra"
@@ -62,6 +63,11 @@ func newRenderCmd() *cobra.Command {
 				if err := layerCacheBundle(ctx, data); err != nil {
 					return err
 				}
+			}
+			// Layer 3.6: per-story context bundle auto-pull (if --story is
+			// set and a bundle file exists at the conventional path).
+			if storyID != "" && (args[0] == "stage_hydrate" || args[0] == "stage_implement") {
+				layerStoryContextBundle(data, storyID)
 			}
 
 			// Layer 2: auto-resolve story + env.
@@ -206,6 +212,23 @@ func layerEnv(ctx context.Context, data map[string]any, storyID string) error {
 	}
 	data["EnvConfig"] = envCfg
 	return nil
+}
+
+// layerStoryContextBundle seeds data["StoryContextBundlePath"] from the
+// conventional bundle location (_bmad-output/context-bundles/<id>.md). If
+// the file doesn't exist, the slot stays empty and the template falls
+// back to its sources-individually instructions.
+func layerStoryContextBundle(data map[string]any, storyID string) {
+	// Match the cmd/story.go DefaultStoryContextBundleDir constant.
+	candidate := filepath.Join("_bmad-output", "context-bundles", storyID+".md")
+	if _, err := os.Stat(candidate); err != nil {
+		return
+	}
+	abs, err := filepath.Abs(candidate)
+	if err != nil {
+		return
+	}
+	data["StoryContextBundlePath"] = abs
 }
 
 // layerCacheBundle pulls the configured sprint.cache_bundle_path into

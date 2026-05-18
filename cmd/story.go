@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
+	appsprint "github.com/sosalejandro/bmad-story-runner-cli/application/sprint"
 	appstate "github.com/sosalejandro/bmad-story-runner-cli/application/state"
 	"github.com/sosalejandro/bmad-story-runner-cli/domain/state"
 	"github.com/sosalejandro/bmad-story-runner-cli/infrastructure/state/sqlite"
@@ -31,6 +33,7 @@ func newStoryCmd() *cobra.Command {
 		newStoryCompleteCmd(),
 		newStoryApplicableStagesCmd(),
 		newStorySetTypeCmd(),
+		newStoryContextBundleCmd(),
 	)
 	addV6PersistentFlags(cmd)
 	return cmd
@@ -442,6 +445,78 @@ discovering "this stage is N/A for this story" at runtime.`,
 		},
 	}
 	cmd.Flags().StringVar(&mode, "mode", "", "override mode (default: from config.mode)")
+	return cmd
+}
+
+// ---------- context-bundle ----------
+
+// DefaultStoryContextBundleDir is where renderers look for per-story
+// bundles when the cmd's --out flag isn't overridden. Matches what
+// the render layer auto-loads.
+const DefaultStoryContextBundleDir = "_bmad-output/context-bundles"
+
+func newStoryContextBundleCmd() *cobra.Command {
+	var (
+		outPath  string
+		epicsPath string
+		archPath  string
+	)
+	cmd := &cobra.Command{
+		Use:   "context-bundle <story-id>",
+		Short: "Pre-extract per-story curated context (entry + FR-matching arch sections) into one file",
+		Long: `Deterministic Go extraction — no LLM. Output is a single self-contained
+markdown file with the story's lightweight epics.md entry + the
+architecture sections matching every FR-Arch-N / FR-NFR-N reference in
+that entry.
+
+The render layer auto-loads ` + "`" + `_bmad-output/context-bundles/<story-id>.md` + "`" + `
+into stage_hydrate / stage_implement prompts as the .StoryContextBundlePath
+slot — agents read this single file instead of grepping the architecture
+canon at runtime. Estimated savings: ~40k input tokens per hydrate
+dispatch (the agent's "figure out what to read" overhead disappears).
+
+Run per-story before each dispatch:
+  bmad story context-bundle <id>
+
+Or batch-pre-build for the next sprint slice ahead of time.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			ctx := context.Background()
+			svc, cleanup, err := openStoryService(ctx)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			id := args[0]
+			docs, _ := svc.Config.Get(ctx, "docs_folder")
+			if epicsPath == "" {
+				if docs == "" {
+					return fmt.Errorf("context-bundle: --epics required (docs_folder not set)")
+				}
+				epicsPath = filepath.Join(docs, "epics.md")
+			}
+			if archPath == "" && docs != "" {
+				archPath = filepath.Join(docs, "architecture.md")
+			}
+			if outPath == "" {
+				outPath = filepath.Join(DefaultStoryContextBundleDir, id+".md")
+			}
+
+			res, err := appsprint.BuildStoryContext(outPath, appsprint.StoryContextSources{
+				StoryID:          id,
+				EpicsPath:        epicsPath,
+				ArchitecturePath: archPath,
+			})
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(os.Stdout).Encode(res)
+		},
+	}
+	cmd.Flags().StringVar(&outPath, "out", "", "output path (default: _bmad-output/context-bundles/<story-id>.md)")
+	cmd.Flags().StringVar(&epicsPath, "epics", "", "epics.md path (default: <docs_folder>/epics.md)")
+	cmd.Flags().StringVar(&archPath, "arch", "", "architecture.md path (default: <docs_folder>/architecture.md)")
 	return cmd
 }
 
