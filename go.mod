@@ -3,9 +3,11 @@ module github.com/sosalejandro/bmad-story-runner-cli
 go 1.25.7
 
 require (
+	github.com/sosalejandro/atlas v0.0.0-20260518085730-ae2e4e1b51d2
 	github.com/spf13/cobra v1.10.2
 	go.uber.org/zap v1.27.1
 	gopkg.in/yaml.v3 v3.0.1
+	modernc.org/sqlite v1.50.1
 )
 
 require (
@@ -22,5 +24,4 @@ require (
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.50.1 // indirect
 )

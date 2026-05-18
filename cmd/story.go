@@ -457,9 +457,10 @@ const DefaultStoryContextBundleDir = "_bmad-output/context-bundles"
 
 func newStoryContextBundleCmd() *cobra.Command {
 	var (
-		outPath  string
+		outPath   string
 		epicsPath string
 		archPath  string
+		repoRoot  string
 	)
 	cmd := &cobra.Command{
 		Use:   "context-bundle <story-id>",
@@ -502,11 +503,22 @@ Or batch-pre-build for the next sprint slice ahead of time.`,
 			if outPath == "" {
 				outPath = filepath.Join(DefaultStoryContextBundleDir, id+".md")
 			}
+			if repoRoot == "" {
+				// Default to the bmad CLI cwd — that's where dispatches
+				// already run from, so atlas's codeindex scan sees the
+				// same source tree as the rest of the pipeline.
+				cwd, err := os.Getwd()
+				if err != nil {
+					return fmt.Errorf("context-bundle: resolve cwd for repo root: %w", err)
+				}
+				repoRoot = cwd
+			}
 
 			res, err := appsprint.BuildStoryContext(outPath, appsprint.StoryContextSources{
 				StoryID:          id,
 				EpicsPath:        epicsPath,
 				ArchitecturePath: archPath,
+				RepoRoot:         repoRoot,
 			})
 			if err != nil {
 				return err
@@ -517,6 +529,7 @@ Or batch-pre-build for the next sprint slice ahead of time.`,
 	cmd.Flags().StringVar(&outPath, "out", "", "output path (default: _bmad-output/context-bundles/<story-id>.md)")
 	cmd.Flags().StringVar(&epicsPath, "epics", "", "epics.md path (default: <docs_folder>/epics.md)")
 	cmd.Flags().StringVar(&archPath, "arch", "", "architecture.md path (default: <docs_folder>/architecture.md)")
+	cmd.Flags().StringVar(&repoRoot, "repo-root", "", "project root for atlas codeindex scan (default: cwd; only used when BMAD_CONTEXT_BUNDLE_INCLUDE_ATLAS=1)")
 	return cmd
 }
 
