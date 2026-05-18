@@ -25,12 +25,60 @@ type Planner struct {
 
 // IngestResult summarises a Plan call.
 type IngestResult struct {
-	StoriesInserted    int   `json:"stories_inserted"`
-	StoriesUpdated     int   `json:"stories_updated"`
-	DependenciesAdded  int   `json:"dependencies_added"`
-	AffectsAdded       int   `json:"affects_added"`
-	BatchesCreated     int   `json:"batches_created"`
+	StoriesInserted    int     `json:"stories_inserted"`
+	StoriesUpdated     int     `json:"stories_updated"`
+	DependenciesAdded  int     `json:"dependencies_added"`
+	AffectsAdded       int     `json:"affects_added"`
+	BatchesCreated     int     `json:"batches_created"`
 	BatchIDs           []int64 `json:"batch_ids"`
+	// Scope, when non-empty, is the epic-id filter that was applied. Stories
+	// outside this scope were skipped entirely.
+	Scope              string  `json:"scope,omitempty"`
+	// StoriesSkippedByScope counts how many parsed stories were excluded
+	// because they don't belong to the requested --scope.
+	StoriesSkippedByScope int `json:"stories_skipped_by_scope,omitempty"`
+}
+
+// CoverageReport summarises frontmatter coverage of a parsed epics set —
+// surfaced by the CLI so an operator can decide whether to proceed against
+// partially-annotated epics or backfill first.
+type CoverageReport struct {
+	TotalStories          int      `json:"total_stories"`
+	WithFrontmatter       int      `json:"with_frontmatter"`
+	WithoutFrontmatter    int      `json:"without_frontmatter"`
+	UnannotatedStoryIDs   []string `json:"unannotated_story_ids,omitempty"`
+}
+
+// AnalyseCoverage builds a CoverageReport over the parsed stories. Cheap
+// (single pass, no IO) — called by the CLI to decide whether to surface a
+// partial-coverage warning before delegating to Plan.
+func AnalyseCoverage(parsed []ParsedStory) CoverageReport {
+	r := CoverageReport{TotalStories: len(parsed)}
+	for _, ps := range parsed {
+		if ps.HasFrontmatter {
+			r.WithFrontmatter++
+			continue
+		}
+		r.WithoutFrontmatter++
+		r.UnannotatedStoryIDs = append(r.UnannotatedStoryIDs, ps.Frontmatter.StoryID)
+	}
+	return r
+}
+
+// FilterByScope returns only the stories whose ID belongs to epicID. An empty
+// epicID returns the slice unchanged. See StoryMatchesEpic for the matching
+// rule (prefix + dot; avoids the "1" / "10" off-by-one footgun).
+func FilterByScope(parsed []ParsedStory, epicID string) []ParsedStory {
+	if epicID == "" {
+		return parsed
+	}
+	out := make([]ParsedStory, 0, len(parsed))
+	for _, ps := range parsed {
+		if StoryMatchesEpic(ps.Frontmatter.StoryID, epicID) {
+			out = append(out, ps)
+		}
+	}
+	return out
 }
 
 // Plan persists parsed stories + builds batches. Clears any existing planned

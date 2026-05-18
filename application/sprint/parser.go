@@ -35,6 +35,12 @@ type ParsedStory struct {
 	Frontmatter StoryFrontmatter
 	SourceFile  string
 	StoryTitle  string // markdown title (### Story X.Y: <title>); fallback for Frontmatter.Title
+	// HasFrontmatter is true iff the parser saw a non-empty YAML block between
+	// `---` delimiters for this story. Stories that fall through with just the
+	// header-derived StoryID + Title (no yaml at all, or an empty `---\n---`)
+	// are flagged false — the planner's coverage-warning surfaces these so an
+	// operator can backfill dependencies before sprinting through them.
+	HasFrontmatter bool
 }
 
 var (
@@ -146,7 +152,34 @@ func commit(s *ParsedStory, buf *strings.Builder) error {
 		fm.Title = s.StoryTitle
 	}
 	s.Frontmatter = fm
+	s.HasFrontmatter = true
 	return nil
+}
+
+// EpicIDFromStory returns the epic-id prefix for a story id, e.g. "1.1" → "1",
+// "10.4" → "10", "4.1.payment-method-mgmt" → "4". Returns the input unchanged
+// when no dot is present (the caller can decide what that means).
+func EpicIDFromStory(storyID string) string {
+	if i := strings.IndexByte(storyID, '.'); i >= 0 {
+		return storyID[:i]
+	}
+	return storyID
+}
+
+// StoryMatchesEpic returns true when storyID is in the scope of epicID:
+//
+//	"1"    matches "1.1", "1.2"   (prefix + dot)
+//	"1"    matches "1"            (exact equality)
+//	"1"    does NOT match "10.1"  (avoids the off-by-one prefix bug)
+//	""     matches everything (an empty scope is a no-op filter)
+func StoryMatchesEpic(storyID, epicID string) bool {
+	if epicID == "" {
+		return true
+	}
+	if storyID == epicID {
+		return true
+	}
+	return strings.HasPrefix(storyID, epicID+".")
 }
 
 // ToStory converts a parsed-story to a domain.Story ready for Stories.Insert.
