@@ -2,6 +2,7 @@ package sprint
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -14,9 +15,19 @@ import (
 // StoryContextSources is the inputs BuildStoryContext reads from. Optional
 // paths are skipped when empty; their sections won't appear in the bundle.
 type StoryContextSources struct {
-	StoryID           string
-	EpicsPath         string // required — the lightweight story entry is the bundle's seed
-	ArchitecturePath  string // optional — FR refs in the entry trigger section extraction here
+	StoryID          string
+	EpicsPath        string // required — the lightweight story entry is the bundle's seed
+	ArchitecturePath string // optional — FR refs in the entry trigger section extraction here
+
+	// RepoRoot is the project root that the atlas codeindex scanner runs
+	// against. Optional; when empty the atlas section is skipped even if
+	// the env var is enabled. Typically the same directory the bmad CLI
+	// runs from (the bmad invocation `cwd`).
+	RepoRoot string
+
+	// CodeContext lets callers override defaults for the atlas section
+	// (hop count, cache dir, etc.). Zero value uses defaults.
+	CodeContext CodeContextOptions
 }
 
 // StoryContextBundle summarises a BuildStoryContext run.
@@ -33,6 +44,18 @@ type StoryContextBundle struct {
 // FR-NFR-12, FR-Saga-1, etc. Greedy on the kind so multi-word kinds
 // (e.g., FR-Arch-XYZ) still capture.
 var frRefRE = regexp.MustCompile(`FR-[A-Za-z]+-\d+`)
+
+// affectedPathRE picks repo-relative paths mentioned in story entries +
+// architecture sections. Conservative: anchored to a known top-level
+// directory and a known source extension, so prose like "src code" doesn't
+// match. The set of top-level dirs matches the canonical monorepo layouts
+// (src, apps, packages, internal, cmd, pkg).
+//
+// Matches inside backticks and bare text. Strips trailing punctuation
+// (commas, periods, parens) in postprocessing.
+var affectedPathRE = regexp.MustCompile(
+	`(?:src|apps|packages|internal|cmd|pkg)/[A-Za-z0-9_./\-]+\.(?:go|ts|tsx|js|jsx)`,
+)
 
 // BuildStoryContext extracts a curated per-story context bundle:
 //
@@ -101,6 +124,10 @@ func BuildStoryContext(outPath string, sources StoryContextSources) (*StoryConte
 
 	// Section 2: FR-ref-driven architecture extracts (if architecture path supplied).
 	frRefs := uniqueOrdered(frRefRE.FindAllString(entry, -1))
+	// archExtractsConcat collects the textual bodies of every emitted arch
+	// section so the atlas affected-path scan (Section 3) can pick up file
+	// references mentioned inside arch sections in addition to the entry.
+	var archExtractsConcat strings.Builder
 	if sources.ArchitecturePath != "" && len(frRefs) > 0 {
 		extracts, missing, err := extractArchSectionsForFRs(sources.ArchitecturePath, frRefs)
 		if err != nil {
@@ -117,6 +144,8 @@ func BuildStoryContext(outPath string, sources StoryContextSources) (*StoryConte
 				return nil, fmt.Errorf("story context: write arch section %s: %w", fr, err)
 			}
 			bundle.Sections = append(bundle.Sections, "architecture.md section for "+fr)
+			archExtractsConcat.WriteString(body)
+			archExtractsConcat.WriteByte('\n')
 		}
 		for _, fr := range missing {
 			bundle.Warnings = append(bundle.Warnings,
@@ -124,6 +153,29 @@ func BuildStoryContext(outPath string, sources StoryContextSources) (*StoryConte
 		}
 	} else if sources.ArchitecturePath == "" {
 		bundle.Warnings = append(bundle.Warnings, "no ArchitecturePath provided — skipped FR-ref extraction")
+	}
+
+	// Section 3 (optional): Atlas codeindex code-context. Feature-flagged
+	// behind BMAD_CONTEXT_BUNDLE_INCLUDE_ATLAS. Skipped silently when:
+	//   - The env var is unset / disabled
+	//   - sources.RepoRoot is empty (no project to scan)
+	//   - The entry + arch sections mention zero affected file paths
+	//   - The codeindex run produces zero symbols matching those paths
+	//
+	// We deliberately call this BEFORE the footer so the generated-at line
+	// stays at the very end of the file — keeps the deterministic-prefix
+	// invariant intact for anything upstream that hashes the section
+	// headers.
+	codeBlock, codeErr := buildCodeContextForBundle(sources, entry, archExtractsConcat.String())
+	if codeErr != nil {
+		bundle.Warnings = append(bundle.Warnings,
+			fmt.Sprintf("atlas code context: %v", codeErr))
+	}
+	if codeBlock != "" {
+		if _, err := fmt.Fprintf(out, "\n\n---\n\n%s", codeBlock); err != nil {
+			return nil, fmt.Errorf("story context: write code context: %w", err)
+		}
+		bundle.Sections = append(bundle.Sections, "atlas codeindex code-context")
 	}
 
 	// Footer with generated-at — last bytes; doesn't affect the
@@ -292,4 +344,71 @@ func uniqueOrdered(in []string) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+// extractAffectedPaths scans story-entry + arch-section text for repo-relative
+// source file references. Returns a sorted, de-duplicated slice. Paths that
+// fail to exist under repoRoot are dropped silently — the regex captures
+// hypothetical paths from prose, so the existence-check is the filter that
+// keeps the codeindex feed clean.
+//
+// When repoRoot is empty no existence check runs (caller is responsible);
+// useful for unit tests that want to verify regex behaviour without a real
+// project tree.
+func extractAffectedPaths(repoRoot string, texts ...string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, t := range texts {
+		for _, m := range affectedPathRE.FindAllString(t, -1) {
+			// Strip trailing punctuation that crept in past the regex
+			// (the char class allows `.` and `-` so a path followed by
+			// "." can over-match).
+			m = strings.TrimRight(m, ".,;:)")
+			if seen[m] {
+				continue
+			}
+			if repoRoot != "" {
+				if _, err := os.Stat(filepath.Join(repoRoot, m)); err != nil {
+					continue
+				}
+			}
+			seen[m] = true
+			out = append(out, m)
+		}
+	}
+	// Stable order independent of source-text order so the bundle is
+	// byte-reproducible across runs.
+	stableSort(out)
+	return out
+}
+
+func stableSort(in []string) {
+	// Tiny helper so the package-internal API stays clean without pulling
+	// in sort just for this. Using insertion sort: callers pass <50 paths.
+	for i := 1; i < len(in); i++ {
+		for j := i; j > 0 && in[j-1] > in[j]; j-- {
+			in[j-1], in[j] = in[j], in[j-1]
+		}
+	}
+}
+
+// buildCodeContextForBundle is the BuildStoryContext-internal wrapper around
+// BuildCodeContextSection. It owns the path-extraction + repo-root resolution
+// logic so storycontext.go's main flow stays linear.
+//
+// Returns ("", nil) for every "section is correctly omitted" case (flag off,
+// no repo root, no affected paths). Returns ("", err) only for unexpected
+// failures, which surface as a Warnings entry on the bundle.
+func buildCodeContextForBundle(sources StoryContextSources, entry, archConcat string) (string, error) {
+	if !atlasFlagEnabled() {
+		return "", nil
+	}
+	if sources.RepoRoot == "" {
+		return "", nil
+	}
+	paths := extractAffectedPaths(sources.RepoRoot, entry, archConcat)
+	if len(paths) == 0 {
+		return "", nil
+	}
+	return BuildCodeContextSection(context.Background(), sources.RepoRoot, paths, sources.CodeContext)
 }
