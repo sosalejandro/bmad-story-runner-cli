@@ -57,6 +57,124 @@ func TestNext_RespectsDependencies(t *testing.T) {
 	}
 }
 
+// TestStoryNext_ScopeFilters seeds pending stories across 3 epics; --scope 2
+// must return only Epic 2's candidates, none from 1.* or 3.*. Issue #35.
+func TestStoryNext_ScopeFilters(t *testing.T) {
+	t.Parallel()
+	svc, _ := newStoryService(t)
+	ctx := context.Background()
+
+	// Three epics, two stories each — all pending, no deps, no affects.
+	for _, id := range []string{"1.1", "1.2", "2.1", "2.2", "3.1", "3.2"} {
+		seed(t, svc, id, state.StatusPending)
+	}
+
+	out, err := svc.NextWithScope(ctx, 10, "2")
+	if err != nil {
+		t.Fatalf("NextWithScope: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("NextWithScope --scope 2 len = %d, want 2 (2.1 + 2.2)", len(out))
+	}
+	for _, n := range out {
+		if n.StoryID != "2.1" && n.StoryID != "2.2" {
+			t.Fatalf("scope 2 returned out-of-scope story %q (full: %+v)", n.StoryID, out)
+		}
+	}
+}
+
+// TestStoryNext_ScopeEmpty — --scope 99 (no matching epic) is NOT an error;
+// it returns an empty batch + exit 0 (the semantic equivalent of "nothing
+// dispatchable right now in this scope"). Issue #35.
+func TestStoryNext_ScopeEmpty(t *testing.T) {
+	t.Parallel()
+	svc, _ := newStoryService(t)
+	ctx := context.Background()
+
+	seed(t, svc, "1.1", state.StatusPending)
+	seed(t, svc, "2.1", state.StatusPending)
+
+	out, err := svc.NextWithScope(ctx, 10, "99")
+	if err != nil {
+		t.Fatalf("NextWithScope --scope 99 (no match) errored: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("NextWithScope --scope 99 = %+v, want empty batch", out)
+	}
+}
+
+// TestStoryNext_ScopeWithMaxParallel — scope + max compose: --scope 2
+// returns only 2.* candidates, AND the max cap clamps within that subset.
+// Verifies the filter is applied BEFORE the cap (else max would be filled
+// with 1.* and then dropped, breaking the contract).
+func TestStoryNext_ScopeWithMaxParallel(t *testing.T) {
+	t.Parallel()
+	svc, _ := newStoryService(t)
+	ctx := context.Background()
+
+	// Epic 1 has 1 story; Epic 2 has 3 stories. Cap to 2 → expect 2 from Epic 2.
+	seed(t, svc, "1.1", state.StatusPending)
+	seed(t, svc, "2.1", state.StatusPending)
+	seed(t, svc, "2.2", state.StatusPending)
+	seed(t, svc, "2.3", state.StatusPending)
+
+	out, err := svc.NextWithScope(ctx, 2, "2")
+	if err != nil {
+		t.Fatalf("NextWithScope: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("NextWithScope --scope 2 --max 2 len = %d, want 2", len(out))
+	}
+	for _, n := range out {
+		if !(n.StoryID == "2.1" || n.StoryID == "2.2" || n.StoryID == "2.3") {
+			t.Fatalf("scope 2 returned out-of-scope story %q (full: %+v)", n.StoryID, out)
+		}
+	}
+}
+
+// TestStoryNext_ScopeOffByOne — --scope 1 must NOT match 10.* (prefix+dot
+// rule, mirroring sprint plan --scope). Guards against the "1" prefix
+// accidentally matching "10.1" via naive HasPrefix.
+func TestStoryNext_ScopeOffByOne(t *testing.T) {
+	t.Parallel()
+	svc, _ := newStoryService(t)
+	ctx := context.Background()
+
+	seed(t, svc, "1.1", state.StatusPending)
+	seed(t, svc, "10.1", state.StatusPending)
+
+	out, err := svc.NextWithScope(ctx, 10, "1")
+	if err != nil {
+		t.Fatalf("NextWithScope: %v", err)
+	}
+	if len(out) != 1 || out[0].StoryID != "1.1" {
+		t.Fatalf("NextWithScope --scope 1 = %+v, want only 1.1 (10.1 must NOT match)", out)
+	}
+}
+
+// TestStoryNext_EmptyScopeEquivalentToNext — sanity: an empty scope is a
+// no-op filter (verifies backward compatibility with existing svc.Next).
+func TestStoryNext_EmptyScopeEquivalentToNext(t *testing.T) {
+	t.Parallel()
+	svc, _ := newStoryService(t)
+	ctx := context.Background()
+
+	seed(t, svc, "1.1", state.StatusPending)
+	seed(t, svc, "2.1", state.StatusPending)
+
+	a, err := svc.Next(ctx, 10)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	b, err := svc.NextWithScope(ctx, 10, "")
+	if err != nil {
+		t.Fatalf("NextWithScope: %v", err)
+	}
+	if len(a) != len(b) {
+		t.Fatalf("Next len %d != NextWithScope(\"\") len %d", len(a), len(b))
+	}
+}
+
 func TestNext_FileOverlapPreventsParallelism(t *testing.T) {
 	t.Parallel()
 	svc, _ := newStoryService(t)

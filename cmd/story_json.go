@@ -63,13 +63,14 @@ func emitStoryListJSON(
 	svc *appstate.StoryService,
 	c *cobra.Command,
 	f state.StoryFilter,
-	statusFlag, stageFlag string,
+	statusFlag, stageFlag, scopeFlag string,
 	hasEnvSet, hasEnv bool,
 ) error {
 	rows, err := svc.Stories.List(ctx, f)
 	if err != nil {
 		return err
 	}
+	rows = filterStoriesByScope(rows, scopeFlag)
 	out := make([]storyRowJSON, 0, len(rows))
 	for _, st := range rows {
 		out = append(out, storyRowJSONFrom(st))
@@ -80,6 +81,9 @@ func emitStoryListJSON(
 	}
 	if stageFlag != "" {
 		args["stage"] = stageFlag
+	}
+	if scopeFlag != "" {
+		args["scope"] = scopeFlag
 	}
 	if hasEnvSet {
 		args["has_env"] = hasEnv

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	appsprint "github.com/sosalejandro/bmad-story-runner-cli/application/sprint"
 	"github.com/sosalejandro/bmad-story-runner-cli/domain/state"
 )
 
@@ -39,7 +40,24 @@ type NextAction struct {
 //
 // File-overlap detection: a story is added to the batch only if its affects
 // set is disjoint from every story already chosen.
+//
+// Equivalent to NextWithScope(ctx, max, "").
 func (s *StoryService) Next(ctx context.Context, max int) ([]NextAction, error) {
+	return s.NextWithScope(ctx, max, "")
+}
+
+// NextWithScope is Next with an optional --scope <epic-id> per-call filter
+// (issue #35). When scope is non-empty, only stories matching the epic
+// (prefix + dot rule from appsprint.StoryMatchesEpic) are considered as
+// candidates. An empty scope is a no-op filter — behaviour identical to
+// Next. The filter is applied to the candidate set BEFORE dependency /
+// file-overlap selection, so it never mutates state and never widens the
+// returned batch beyond the scoped slice.
+//
+// A scope that matches zero stories returns an empty batch (no error).
+// That mirrors the "nothing dispatchable right now" shape callers already
+// handle for the unscoped case.
+func (s *StoryService) NextWithScope(ctx context.Context, max int, scope string) ([]NextAction, error) {
 	if max <= 0 {
 		max = s.effectiveMaxParallel(ctx)
 	}
@@ -56,6 +74,11 @@ func (s *StoryService) Next(ctx context.Context, max int) ([]NextAction, error) 
 	for _, st := range candidates {
 		if len(out) >= max {
 			break
+		}
+		// --scope filter — apply BEFORE the (more expensive) deps + affects
+		// lookups so a tightly-scoped call short-circuits cleanly.
+		if !appsprint.StoryMatchesEpic(st.ID, scope) {
+			continue
 		}
 		ok, err := s.depsSatisfied(ctx, st.ID)
 		if err != nil {

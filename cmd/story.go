@@ -72,6 +72,7 @@ func newStoryStatusCmd() *cobra.Command {
 	var (
 		statusFlag string
 		stageFlag  string
+		scopeFlag  string
 		hasEnv     bool
 		hasEnvSet  bool
 	)
@@ -108,22 +109,24 @@ func newStoryStatusCmd() *cobra.Command {
 				f.HasEnv = &hasEnv
 			}
 			if jsonOutput {
-				return emitStoryListJSON(ctx, svc, c, f, statusFlag, stageFlag, hasEnvSet, hasEnv)
+				return emitStoryListJSON(ctx, svc, c, f, statusFlag, stageFlag, scopeFlag, hasEnvSet, hasEnv)
 			}
-			return printStoryTable(ctx, svc, f)
+			return printStoryTable(ctx, svc, f, scopeFlag)
 		},
 	}
 	cmd.Flags().StringVar(&statusFlag, "status", "", "filter by status")
 	cmd.Flags().StringVar(&stageFlag, "stage", "", "filter by current stage")
+	cmd.Flags().StringVar(&scopeFlag, "scope", "", "restrict rows to one epic id (e.g. 2 → only 2.* stories)")
 	cmd.Flags().BoolVar(&hasEnv, "has-env", false, "filter by env-up state")
 	return cmd
 }
 
-func printStoryTable(ctx context.Context, svc *appstate.StoryService, f state.StoryFilter) error {
+func printStoryTable(ctx context.Context, svc *appstate.StoryService, f state.StoryFilter, scope string) error {
 	rows, err := svc.Stories.List(ctx, f)
 	if err != nil {
 		return err
 	}
+	rows = filterStoriesByScope(rows, scope)
 	if len(rows) == 0 {
 		fmt.Println("(no stories match filter)")
 		return nil
@@ -143,6 +146,23 @@ func printStoryTable(ctx context.Context, svc *appstate.StoryService, f state.St
 			st.ID, st.Status, stage, st.Complexity, ci, st.Title)
 	}
 	return w.Flush()
+}
+
+// filterStoriesByScope is the `bmad story status --scope <epic>` post-filter
+// (issue #35). Empty scope is a no-op. Uses the same prefix+dot matching
+// rule as `bmad sprint plan --scope` via appsprint.StoryMatchesEpic, so
+// --scope 1 will NOT match 10.* (avoids the off-by-one prefix bug).
+func filterStoriesByScope(rows []state.Story, scope string) []state.Story {
+	if scope == "" {
+		return rows
+	}
+	out := rows[:0]
+	for _, st := range rows {
+		if appsprint.StoryMatchesEpic(st.ID, scope) {
+			out = append(out, st)
+		}
+	}
+	return out
 }
 
 func printStoryDetail(ctx context.Context, svc *appstate.StoryService, id string) error {
@@ -236,6 +256,7 @@ func newStoryNextCmd() *cobra.Command {
 		max     int
 		claim   bool
 		claimer string
+		scope   string
 	)
 	cmd := &cobra.Command{
 		Use:   "next",
@@ -252,7 +273,14 @@ non-complete story is cleared so a crashed orchestrator session doesn't
 permanently lock the story. Reaped ids print a one-line warning to
 stderr; the JSON envelope on stdout lists them in reaped_claims so
 downstream telemetry can count them. Set claim_ttl_seconds=0 in config
-to disable the reaper.`,
+to disable the reaper.
+
+--scope <epic-id> (issue #35): per-call filter that restricts the
+candidate set to stories whose id matches the epic (e.g. --scope 2 →
+only 2.* stories; --scope 10 will NOT match 1.* — uses the same
+prefix+dot rule as ` + "`bmad sprint plan --scope`" + `). The filter is
+applied to candidates BEFORE pick, never mutates state, and an empty
+match returns an empty batch (exit 0), not an error.`,
 		RunE: func(c *cobra.Command, args []string) error {
 			ctx := context.Background()
 			svc, cleanup, err := openStoryService(ctx)
@@ -265,6 +293,11 @@ to disable the reaper.`,
 			// becomes eligible on the same `bmad story next` invocation
 			// that exposes the gap. Operator gets a warning per reaped id —
 			// silence here would mask the orchestrator-crash residue.
+			//
+			// NOTE: reaping is intentionally global, not --scope-bounded —
+			// a stuck claim outside the requested scope is still crash
+			// residue worth clearing on the same invocation. The reaper
+			// touches claim metadata only, never story status.
 			ttl := effectiveClaimTTL(ctx, svc)
 			reaped, err := svc.Stories.ReapStaleClaims(ctx, ttl)
 			if err != nil {
@@ -276,7 +309,7 @@ to disable the reaper.`,
 					id, ttl)
 			}
 
-			actions, err := svc.Next(ctx, max)
+			actions, err := svc.NextWithScope(ctx, max, scope)
 			if err != nil {
 				return err
 			}
@@ -316,11 +349,17 @@ to disable the reaper.`,
 				"reaped_claims":     reaped,
 				"claim_ttl_seconds": ttl,
 			}
+			if scope != "" {
+				result["scope"] = scope
+			}
 			if jsonOutput {
 				args := map[string]any{
 					"max_parallel": max,
 					"claim":        claim,
 					"claimer":      claimer,
+				}
+				if scope != "" {
+					args["scope"] = scope
 				}
 				warnings := make([]string, 0, len(reaped))
 				for _, id := range reaped {
@@ -335,6 +374,7 @@ to disable the reaper.`,
 	cmd.Flags().IntVar(&max, "max-parallel", 0, "override max parallel slots (else uses config)")
 	cmd.Flags().BoolVar(&claim, "claim", true, "atomically claim returned stories (set claimed_at + claimed_by)")
 	cmd.Flags().StringVar(&claimer, "claimer", "orchestrator", "claimed_by value (e.g. session id)")
+	cmd.Flags().StringVar(&scope, "scope", "", "restrict candidates to one epic id (e.g. 2 → only 2.* stories; empty = no filter)")
 	return cmd
 }
 
