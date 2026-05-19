@@ -89,6 +89,10 @@ so Claude does not need to write inline Python or bash scripts.`,
 	// Wrap all leaf commands with logging middleware.
 	wrapCommandsWithLogging(root)
 
+	// --help-json must be registered AFTER subcommands are added so the
+	// tree walk it triggers sees the full surface. See cmd/help_json.go.
+	registerHelpJSONFlag(root)
+
 	return root
 }
 
