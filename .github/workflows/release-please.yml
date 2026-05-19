@@ -1,7 +1,7 @@
 name: release-please
 on:
   push:
-    branches: [v2]
+    branches: [main]
 permissions:
   contents: write
   pull-requests: write
@@ -11,5 +11,5 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v4
         with:
-          target-branch: v2
+          target-branch: main
           release-type: go
