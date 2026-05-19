@@ -367,21 +367,37 @@ func containsSection(sections []string, want string) bool {
 
 // Integration: scan the live nutrition-v2-go checkout, build a bundle for
 // Story 1.2 (which exists in docs/architecture/eda-cutover/epics.md). Story
-// 1.2 references files that the story itself CREATES (save_with_events.go,
-// load_and_mutate.go), so they don't exist on disk yet — the affected-path
-// existence-check correctly filters them out and the atlas section is
-// expected to be absent. This is the "story whose affected files don't
-// exist yet" case from the task spec: the section must be OMITTED, not
-// emitted-empty. Skipped cleanly when the checkout is absent so this test
-// is safe in CI sandboxes.
-func TestBuildStoryContext_NutritionV2Go_Story12_NoExistingFiles(t *testing.T) {
+// Story 1.2 references the canonical service-helper file
+// `src/shared/application/services/save_with_events.go` (the companion
+// `load_and_mutate.go` is mentioned only as a bare filename — without the
+// `src/...` prefix it is correctly excluded by affectedPathRE, which is the
+// real conservative-extraction contract). That file shipped with Story 1.2
+// itself (commit fb3f8140 on Floreo-Nutrire/nutrition-v2-go) and now exists
+// on disk, so the atlas section MUST appear in the bundle and reference it.
+//
+// Historical note: this test previously asserted the inverse — that the
+// atlas section was OMITTED because the files didn't exist yet. Once Story
+// 1.2 landed the assertion inverted (see bmad-story-runner-cli#23). The
+// positive form exercises the real BuildStoryContext contract: when a story
+// references a file that exists on disk, the affected-path existence-check
+// keeps it and the atlas section is emitted with that file reference.
+// Skipped cleanly when the checkout (or the expected file) is absent so
+// this test is safe in CI sandboxes.
+func TestBuildStoryContext_NutritionV2Go_Story12_HasCodeContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping nutrition-v2-go scan in -short mode (full repo scan ~25s)")
+	}
 	const (
-		repoRoot  = "/home/alejandrososa/Documents/startup-projects/nutrition-v2-go"
-		epicsPath = "docs/architecture/eda-cutover/epics.md"
-		archPath  = "docs/architecture/eda-cutover/architecture.md"
+		repoRoot        = "/home/alejandrososa/Documents/startup-projects/nutrition-v2-go"
+		epicsPath       = "docs/architecture/eda-cutover/epics.md"
+		archPath        = "docs/architecture/eda-cutover/architecture.md"
+		expectedFileRef = "src/shared/application/services/save_with_events.go"
 	)
 	if _, err := os.Stat(filepath.Join(repoRoot, epicsPath)); err != nil {
 		t.Skipf("nutrition-v2-go checkout not present at %s: %v", repoRoot, err)
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, expectedFileRef)); err != nil {
+		t.Skipf("expected Story 1.2 file missing (%s): %v", expectedFileRef, err)
 	}
 
 	t.Setenv(sprint.EnvIncludeAtlas, "1")
@@ -406,9 +422,13 @@ func TestBuildStoryContext_NutritionV2Go_Story12_NoExistingFiles(t *testing.T) {
 	if !strings.Contains(got, "Story 1.2") {
 		t.Fatal("bundle is missing the 1.2 entry")
 	}
-	if strings.Contains(got, "### Code context (from atlas codeindex)") {
-		t.Errorf("Story 1.2 references only not-yet-existing files; atlas section should be omitted but is present\n%s",
-			truncate(got, 2000))
+	if !strings.Contains(got, "### Code context (from atlas codeindex)") {
+		t.Fatalf("Story 1.2 references an existing file; atlas section should appear but is missing\n%s",
+			truncate(got, 4000))
+	}
+	if !strings.Contains(got, expectedFileRef) {
+		t.Errorf("expected the atlas section to mention %s, did not find it.\n%s",
+			expectedFileRef, truncate(got, 4000))
 	}
 }
 
