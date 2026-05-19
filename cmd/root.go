@@ -119,7 +119,16 @@ func wrapSingleCommand(cmd *cobra.Command) {
 	}
 }
 
-// runWithLogging executes the command function and writes an audit log entry.
+// runWithLogging executes the command function and writes a single audit log
+// entry per invocation.
+//
+// Earlier versions emitted both a session_start and a command entry on every
+// invocation, which produced two audit rows per `bmad` run because each
+// process has its own PID and therefore matched as a "new session" by the
+// PWD+PID check. Session correlation across invocations is a read-time
+// concern; the embedded Session field on each command entry already carries
+// PPID/PWD/User/Terminal, which is sufficient to group entries downstream.
+// (closes #4)
 func runWithLogging(cmd *cobra.Command, args []string, fn func() error) error {
 	if noLog {
 		return fn()
@@ -131,11 +140,6 @@ func runWithLogging(cmd *cobra.Command, args []string, fn func() error) error {
 	}
 
 	session := infrastructure.CollectSessionInfo(Version, CommitSHA)
-
-	// Check if this is a new session.
-	if last := lw.LastEntry(); last == nil || last.IsNewSession(&domain.LogEntry{Session: session}) {
-		lw.WriteEntry(domain.NewSessionStartEntry(session)) //nolint:errcheck
-	}
 
 	startTime := time.Now()
 
