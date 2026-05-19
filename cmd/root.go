@@ -22,8 +22,9 @@ func NewRootCmd(logger *zap.Logger) *cobra.Command {
 	log = logger
 
 	root := &cobra.Command{
-		Use:   "bmad",
-		Short: "BMAD Story Runner CLI — manage bmad-progress.json without ad-hoc scripts",
+		Use:     "bmad",
+		Short:   "BMAD Story Runner CLI — manage bmad-progress.json without ad-hoc scripts",
+		Version: VersionString(),
 		Long: `bmad is a CLI tool for the BMAD Story Runner skill.
 It manages progress tracking, story status, QA gates, and reconciliation
 so Claude does not need to write inline Python or bash scripts.`,
@@ -34,6 +35,10 @@ so Claude does not need to write inline Python or bash scripts.`,
 			}
 		},
 	}
+	// Wire `-v` as the short flag for `--version`. Cobra wires only the
+	// long form by default once Version is set; users (and CI scripts)
+	// expect both forms to work.
+	root.Flags().BoolP("version", "v", false, "print the bmad-cli version, commit, and build date")
 
 	root.PersistentFlags().BoolVar(&noLog, "no-log", false, "Disable audit logging for this invocation")
 

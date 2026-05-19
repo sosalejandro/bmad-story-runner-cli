@@ -15,8 +15,15 @@ import (
 	appsprint "github.com/sosalejandro/bmad-story-runner-cli/application/sprint"
 	appstate "github.com/sosalejandro/bmad-story-runner-cli/application/state"
 	"github.com/sosalejandro/bmad-story-runner-cli/domain/state"
+	"github.com/sosalejandro/bmad-story-runner-cli/infrastructure"
 	"github.com/sosalejandro/bmad-story-runner-cli/infrastructure/state/sqlite"
 )
+
+// storyCompleteGitRunner is the GitRunner used by `bmad story complete
+// --commit`. Production wiring is ExecGitRunner; tests swap in a mock.
+// Package-level so the unit test can inject without exporting the full
+// command constructor surface area.
+var storyCompleteGitRunner infrastructure.GitRunner = infrastructure.ExecGitRunner{}
 
 // newStoryCmd is the parent of the `bmad story <verb>` namespace.
 func newStoryCmd() *cobra.Command {
@@ -381,11 +388,37 @@ func newStorySetStatusCmd() *cobra.Command {
 // ---------- complete ----------
 
 func newStoryCompleteCmd() *cobra.Command {
-	var commit, prURL string
+	var (
+		commitHash string
+		prURL      string
+		autoCommit bool
+		noCommit   bool
+		repoDir    string
+	)
 	cmd := &cobra.Command{
 		Use:   "complete <story-id> [<story-id>...]",
-		Short: "Mark stories complete (variadic). --commit/--pr only meaningful for single id",
-		Args:  cobra.MinimumNArgs(1),
+		Short: "Mark stories complete (variadic). --commit-hash/--pr-url metadata; --commit auto-commits the story file",
+		Long: `Mark one or more stories complete.
+
+Metadata flags (single-id only):
+  --commit-hash <sha>   record the commit that finished the work
+  --pr-url <url>        record the PR that landed the work
+
+Compound workflow flag (single-id only):
+  --commit              after setting status=complete, also:
+                          1. patch the story .md file's **Status:** line
+                          2. git add the story file
+                          3. git commit with a generated message
+                        Fails if the working tree has unrelated changes
+                        (commit those separately or pass --no-commit).
+  --no-commit           explicitly disables the compound workflow even
+                        when --commit is also set (escape hatch for
+                        scripts that want metadata-only behaviour on a
+                        clean tree).
+
+Idempotency: re-running --commit on an already-complete story is a
+no-op; a warning is emitted to stderr and the command returns ok.`,
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			ctx := context.Background()
 			svc, cleanup, err := openStoryService(ctx)
@@ -394,27 +427,118 @@ func newStoryCompleteCmd() *cobra.Command {
 			}
 			defer cleanup()
 
-			if len(args) > 1 && (commit != "" || prURL != "") {
-				return fmt.Errorf("--commit / --pr are only meaningful for a single story id")
+			singleOnly := commitHash != "" || prURL != "" || autoCommit
+			if len(args) > 1 && singleOnly {
+				return fmt.Errorf("--commit / --commit-hash / --pr-url are only meaningful for a single story id")
 			}
 
 			for _, id := range args {
-				if err := svc.Stories.SetComplete(ctx, id, commit, prURL); err != nil {
-					return fmt.Errorf("complete %q: %w", id, err)
+				if err := runCompleteOne(ctx, svc, id, commitHash, prURL, autoCommit, noCommit, repoDir); err != nil {
+					return err
 				}
-				// Release the claim so a future re-plan or admin set-status
-				// can re-route the story without claim leftover.
-				if err := svc.Stories.ReleaseClaim(ctx, id); err != nil {
-					return fmt.Errorf("release claim %q: %w", id, err)
-				}
-				fmt.Printf("%s -> complete\n", id)
 			}
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&commit, "commit", "", "commit hash (single-id only)")
-	cmd.Flags().StringVar(&prURL, "pr", "", "PR URL (single-id only)")
+	cmd.Flags().StringVar(&commitHash, "commit-hash", "", "commit hash metadata (single-id only)")
+	cmd.Flags().StringVar(&prURL, "pr-url", "", "PR URL metadata (single-id only)")
+	cmd.Flags().BoolVar(&autoCommit, "commit", false, "after marking complete, patch the story file + git commit (single-id only)")
+	cmd.Flags().BoolVar(&noCommit, "no-commit", false, "override: disable the --commit compound workflow even if --commit is set")
+	cmd.Flags().StringVar(&repoDir, "repo-dir", ".", "repository directory for the --commit git operations (default: cwd)")
 	return cmd
+}
+
+// runCompleteOne handles one story id. Split out so the compound flow
+// stays readable + so the unit test can hit it directly without
+// constructing the cobra command tree.
+func runCompleteOne(
+	ctx context.Context,
+	svc *appstate.StoryService,
+	id, commitHash, prURL string,
+	autoCommit, noCommit bool,
+	repoDir string,
+) error {
+	// Idempotency check for the compound flow — re-running --commit on a
+	// story already in `complete` status is a no-op, not an error. The
+	// metadata-only flow is allowed to re-set fields freely (SetComplete
+	// already handles that case at the repo layer).
+	if autoCommit && !noCommit {
+		st, err := svc.Stories.Get(ctx, id)
+		if err != nil {
+			return fmt.Errorf("complete %q: %w", id, err)
+		}
+		if st.Status == state.StatusComplete {
+			fmt.Fprintf(os.Stderr, "WARN: story %s already complete; --commit is a no-op\n", id)
+			return nil
+		}
+	}
+
+	if err := svc.Stories.SetComplete(ctx, id, commitHash, prURL); err != nil {
+		return fmt.Errorf("complete %q: %w", id, err)
+	}
+	if err := svc.Stories.ReleaseClaim(ctx, id); err != nil {
+		return fmt.Errorf("release claim %q: %w", id, err)
+	}
+	fmt.Printf("%s -> complete\n", id)
+
+	if !autoCommit || noCommit {
+		return nil
+	}
+
+	st, err := svc.Stories.Get(ctx, id)
+	if err != nil {
+		return fmt.Errorf("complete --commit %q: refetch: %w", id, err)
+	}
+	if st.File == "" {
+		return fmt.Errorf("complete --commit %q: story.file is empty; cannot patch story .md", id)
+	}
+
+	// Step 1: patch the story file's Status: line. The patcher is
+	// idempotent — running it twice produces identical content.
+	patcher := infrastructure.NewMDStoryFilePatcher(log)
+	if err := patcher.PatchStatus(st.File, string(state.StatusComplete)); err != nil {
+		return fmt.Errorf("complete --commit %q: patch story file: %w", id, err)
+	}
+
+	// Step 2: dirty-tree check. The story file path stored in the DB is
+	// either absolute or repo-relative; for the porcelain comparison
+	// we want the path git itself would emit, which is the repo-relative
+	// form. If the stored File is absolute, derive the relative form
+	// against repoDir.
+	storyFileRel := st.File
+	if filepath.IsAbs(st.File) {
+		if absRepo, err := filepath.Abs(repoDir); err == nil {
+			if rel, err := filepath.Rel(absRepo, st.File); err == nil {
+				storyFileRel = filepath.ToSlash(rel)
+			}
+		}
+	}
+
+	porcelain, err := storyCompleteGitRunner.Status(ctx, repoDir)
+	if err != nil {
+		return fmt.Errorf("complete --commit %q: git status: %w", id, err)
+	}
+	if clean, reason := infrastructure.IsCleanForStoryFile(porcelain, storyFileRel); !clean {
+		return fmt.Errorf(
+			"complete --commit %q: working tree dirty (%s); commit your other changes first or rerun with --no-commit",
+			id, reason)
+	}
+
+	// Step 3: stage the story file + commit.
+	if err := storyCompleteGitRunner.Add(ctx, repoDir, storyFileRel); err != nil {
+		return fmt.Errorf("complete --commit %q: %w", id, err)
+	}
+	msg := fmt.Sprintf("chore(story): mark %s complete\n\nBMAD-Story: %s", id, id)
+	sha, err := storyCompleteGitRunner.Commit(ctx, repoDir, msg)
+	if err != nil {
+		return fmt.Errorf("complete --commit %q: %w", id, err)
+	}
+	if sha != "" {
+		fmt.Printf("%s -> committed %s\n", id, sha)
+	} else {
+		fmt.Printf("%s -> committed\n", id)
+	}
+	return nil
 }
 
 // effectiveMaxParallel mirrors the application-side logic for cmd-level use.
