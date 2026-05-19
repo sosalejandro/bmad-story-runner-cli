@@ -64,7 +64,8 @@ so Claude does not need to write inline Python or bash scripts.`,
 		newDispatchCmd(),   // v6 — dispatch record (§12.7 token cost)
 		newRenderCmd(),     // v6 — prompt template render
 		newSystemCheckCmd(), // v6 — host resource probe
-		newSprintCmd(),     // v6 — sprint namespace (plan/run/pause/resume/status)
+		newDoctorCmd(),      // v6 — env self-check (binary/atlas/db/schema/exit codes)
+		newSprintCmd(),      // v6 — sprint namespace (plan/run/pause/resume/status)
 		newMigrateCmd(),    // v6 — one-shot v4 progress.json → v6 sqlite import
 		newStatusCmd(),
 		newSetStatusCmd(),
