@@ -49,12 +49,18 @@ Exit code matches the child process.`,
 				}
 			}
 
-			// Run the child process.
+			// Run the child process. Tee stdout/stderr through byte counters
+			// so the audit row records what the child emitted; without this
+			// child_stdout_bytes / child_stderr_bytes were always zero.
+			// CountingWriter wraps the real stream and forwards every Write,
+			// so output is emitted exactly once. (closes #5)
 			startTime := time.Now()
-			child := osexec.Command(childCmd, childArgs...)
+			child := osexec.Command(childCmd, childArgs...) //nolint:gosec // bmad exec is a deliberate command-runner wrapper
 			child.Stdin = os.Stdin
-			child.Stdout = os.Stdout
-			child.Stderr = os.Stderr
+			stdoutTap := &infrastructure.CountingWriter{W: os.Stdout}
+			stderrTap := &infrastructure.CountingWriter{W: os.Stderr}
+			child.Stdout = stdoutTap
+			child.Stderr = stderrTap
 
 			err := child.Run()
 			elapsed := time.Since(startTime)
@@ -89,6 +95,8 @@ Exit code matches the child process.`,
 					ChildArgs:         childArgs,
 					ChildExitCode:     childExitCode,
 					ChildDurationMs:   float64(elapsed.Milliseconds()),
+					ChildStdoutBytes:  stdoutTap.Count(),
+					ChildStderrBytes:  stderrTap.Count(),
 					ChildPeakRSSBytes: peakRSS,
 					ChildUserTimeMs:   userTimeMs,
 					ChildSysTimeMs:    sysTimeMs,
@@ -105,7 +113,11 @@ Exit code matches the child process.`,
 					TotalMs:     float64(elapsed.Milliseconds()),
 					WallClockNs: elapsed.Nanoseconds(),
 				}
-				entry.Result = &domain.ResultInfo{ExitCode: childExitCode}
+				entry.Result = &domain.ResultInfo{
+					ExitCode:    childExitCode,
+					StdoutBytes: stdoutTap.Count(),
+					StderrBytes: stderrTap.Count(),
+				}
 
 				lw := getLogWriter(nil)
 				if lw != nil {
