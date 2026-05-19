@@ -314,6 +314,9 @@ func newSprintStatusCmd() *cobra.Command {
 				"unresolved_checkpoint": unresolved,
 				"tokens":           tokenBreakdown,
 			}
+			if jsonOutput {
+				return emitJSONStdout(commandPathSansRoot(c), nil, report, nil)
+			}
 			if raw {
 				return json.NewEncoder(os.Stdout).Encode(report)
 			}

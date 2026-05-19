@@ -89,6 +89,9 @@ func newStoryStatusCmd() *cobra.Command {
 			defer cleanup()
 
 			if len(args) == 1 {
+				if jsonOutput {
+					return emitStoryDetailJSON(ctx, svc, c, args[0])
+				}
 				return printStoryDetail(ctx, svc, args[0])
 			}
 
@@ -103,6 +106,9 @@ func newStoryStatusCmd() *cobra.Command {
 			}
 			if hasEnvSet {
 				f.HasEnv = &hasEnv
+			}
+			if jsonOutput {
+				return emitStoryListJSON(ctx, svc, c, f, statusFlag, stageFlag, hasEnvSet, hasEnv)
 			}
 			return printStoryTable(ctx, svc, f)
 		},
@@ -298,13 +304,27 @@ to disable the reaper.`,
 				actions = kept
 			}
 
-			return json.NewEncoder(os.Stdout).Encode(map[string]any{
-				"max":             max,
-				"claimed":         claim,
-				"actions":         actions,
-				"reaped_claims":   reaped,
+			result := map[string]any{
+				"max":               max,
+				"claimed":           claim,
+				"actions":           actions,
+				"reaped_claims":     reaped,
 				"claim_ttl_seconds": ttl,
-			})
+			}
+			if jsonOutput {
+				args := map[string]any{
+					"max_parallel": max,
+					"claim":        claim,
+					"claimer":      claimer,
+				}
+				warnings := make([]string, 0, len(reaped))
+				for _, id := range reaped {
+					warnings = append(warnings,
+						fmt.Sprintf("reaped stale claim on %s (age > %ds; assuming orchestrator crash)", id, ttl))
+				}
+				return emitJSONStdout(commandPathSansRoot(c), args, result, warnings)
+			}
+			return json.NewEncoder(os.Stdout).Encode(result)
 		},
 	}
 	cmd.Flags().IntVar(&max, "max-parallel", 0, "override max parallel slots (else uses config)")
