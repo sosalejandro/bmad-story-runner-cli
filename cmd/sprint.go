@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	appsprint "github.com/sosalejandro/bmad-story-runner-cli/application/sprint"
+	"github.com/sosalejandro/bmad-story-runner-cli/application/sprint/inferdeps"
 	"github.com/sosalejandro/bmad-story-runner-cli/domain/state"
 	"github.com/sosalejandro/bmad-story-runner-cli/infrastructure/state/sqlite"
 )
@@ -32,6 +33,7 @@ func newSprintCmd() *cobra.Command {
 		newSprintResumeCmd(),
 		newSprintStatusCmd(),
 		newSprintCacheBundleCmd(),
+		newSprintInferDepsCmd(),
 	)
 	addV6PersistentFlags(cmd)
 	return cmd
@@ -431,5 +433,89 @@ renders can find it automatically. Default output:
 	}
 	cmd.Flags().StringVar(&outPath, "out", "", "output path (default: <docs_folder>/sprint-cache-bundle.md)")
 	cmd.Flags().StringVar(&docsDir, "docs", "", "source docs folder (default: config.docs_folder)")
+	return cmd
+}
+
+// ---------- infer-deps ----------
+
+// newSprintInferDepsCmd wires `bmad sprint infer-deps` — parses an
+// epics.md file for **Given** / **Refs** / epic-level prose cues and
+// emits suggested `depends_on:` YAML patches. See issue #19.
+func newSprintInferDepsCmd() *cobra.Command {
+	var (
+		epicsPath     string
+		scope         string
+		apply         bool
+		backup        bool
+		intraEpic     bool
+	)
+	cmd := &cobra.Command{
+		Use:   "infer-deps",
+		Short: "Suggest depends_on patches by parsing epics.md prose cues (closes #19)",
+		Long: `Walks epics.md and per-story extracts dependency cues from the
+**Given** / **Refs** prose plus the parent epic header, then emits
+suggested ` + "`depends_on:`" + ` YAML patches.
+
+Dry-run (default): suggestions print to stdout — paste into epics.md.
+With ` + "`--apply`" + ` the existing depends_on line is rewritten in place;
+pair with ` + "`--backup`" + ` to keep a ` + "`.bak`" + ` companion.
+
+Recogniser confidence:
+  HIGH   explicit "Story X.Y" mention inside a **Given** / **Refs** line
+  MEDIUM "Slice <s>" or "Epic N" mention resolved to last story of that epic
+  LOW    intra-epic fallback (Story X.Y → X.(Y-1)) — only when --intra-epic`,
+		RunE: func(c *cobra.Command, args []string) error {
+			ctx := context.Background()
+			// Resolve epicsPath from config.docs_folder when the flag is
+			// omitted, mirroring `bmad sprint plan`'s convention.
+			if epicsPath == "" {
+				db, err := openV6DB(ctx)
+				if err != nil {
+					return err
+				}
+				defer db.Close()
+				cfg := sqlite.NewConfigStore(db)
+				docs, err := cfg.Get(ctx, "docs_folder")
+				if err != nil {
+					return fmt.Errorf("sprint infer-deps: --epics required (docs_folder not set: %w)", err)
+				}
+				epicsPath = filepath.Join(docs, "epics.md")
+			}
+
+			res, warnings, err := inferdeps.Run(inferdeps.RunOptions{
+				EpicsPath:         epicsPath,
+				ScopeEpic:         scope,
+				Apply:             apply,
+				Backup:            backup,
+				IntraEpicFallback: intraEpic,
+			})
+			if err != nil {
+				return err
+			}
+
+			if jsonOutput {
+				args := map[string]any{
+					"epics":       epicsPath,
+					"apply":       apply,
+					"backup":      backup,
+					"intra_epic":  intraEpic,
+				}
+				if scope != "" {
+					args["scope"] = scope
+				}
+				return emitJSONStdout(commandPathSansRoot(c), args, res, warnings)
+			}
+
+			for _, w := range warnings {
+				fmt.Fprintln(os.Stderr, "warn:", w)
+			}
+			return inferdeps.EmitSummary(os.Stdout, res)
+		},
+	}
+	cmd.Flags().StringVar(&epicsPath, "epics", "", "epics.md path (default: <docs_folder>/epics.md)")
+	cmd.Flags().StringVar(&scope, "scope", "", "restrict to one epic id (e.g. 4 → only 4.* stories)")
+	cmd.Flags().BoolVar(&apply, "apply", false, "rewrite depends_on in place (default: dry-run)")
+	cmd.Flags().BoolVar(&backup, "backup", false, "write a .bak companion when --apply (no-op otherwise)")
+	cmd.Flags().BoolVar(&intraEpic, "intra-epic", false, "enable LOW-confidence Story X.Y → X.(Y-1) fallback")
 	return cmd
 }
