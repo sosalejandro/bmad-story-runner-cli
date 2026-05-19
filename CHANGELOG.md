@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.2.0...v0.2.1) (2026-05-19)
+
+
+### Bug Fixes
+
+* **cli:** real version string from runtime/debug.ReadBuildInfo() ([#39](https://github.com/sosalejandro/bmad-story-runner-cli/issues/39)) ([2618223](https://github.com/sosalejandro/bmad-story-runner-cli/commit/26182237c7123f1857b5a6ab90affc24170fb0df))
+
 ## [0.2.0](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.1.0...v0.2.0) (2026-05-19)
 
 
