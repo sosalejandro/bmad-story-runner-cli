@@ -401,8 +401,26 @@ func newStorySetStatusCmd() *cobra.Command {
 			defer cleanup()
 
 			id, status := args[0], state.Status(args[1])
+			// Look up the prior status so the JSON envelope can include
+			// it as old_status. We tolerate not-found here (returns "") —
+			// SetStatus will surface the real error if the story really
+			// doesn't exist.
+			var oldStatus string
+			if pre, err := svc.Stories.Get(ctx, id); err == nil {
+				oldStatus = string(pre.Status)
+			}
 			if err := svc.Stories.SetStatus(ctx, id, status); err != nil {
 				return fmt.Errorf("set-status %q: %w", id, err)
+			}
+			if jsonOutput {
+				return emitJSONStdout(commandPathSansRoot(c),
+					map[string]any{"story_id": id, "new_status": string(status)},
+					map[string]any{
+						"ok":         true,
+						"story_id":   id,
+						"old_status": oldStatus,
+						"new_status": string(status),
+					}, nil)
 			}
 			fmt.Printf("%s -> %s\n", id, status)
 			return nil
@@ -457,10 +475,22 @@ no-op; a warning is emitted to stderr and the command returns ok.`,
 				return fmt.Errorf("--commit / --commit-hash / --pr-url are only meaningful for a single story id")
 			}
 
+			completed := make([]string, 0, len(args))
 			for _, id := range args {
 				if err := runCompleteOne(ctx, svc, id, commitHash, prURL, autoCommit, noCommit, repoDir); err != nil {
 					return err
 				}
+				completed = append(completed, id)
+			}
+			if jsonOutput {
+				return emitJSONStdout(commandPathSansRoot(c),
+					map[string]any{"story_ids": args},
+					map[string]any{
+						"ok":          true,
+						"completed":   completed,
+						"commit_hash": commitHash,
+						"pr":          prURL,
+					}, nil)
 			}
 			return nil
 		},
@@ -504,7 +534,9 @@ func runCompleteOne(
 	if err := svc.Stories.ReleaseClaim(ctx, id); err != nil {
 		return fmt.Errorf("release claim %q: %w", id, err)
 	}
-	fmt.Printf("%s -> complete\n", id)
+	if !jsonOutput {
+		fmt.Printf("%s -> complete\n", id)
+	}
 
 	if !autoCommit || noCommit {
 		return nil
@@ -558,10 +590,12 @@ func runCompleteOne(
 	if err != nil {
 		return fmt.Errorf("complete --commit %q: %w", id, err)
 	}
-	if sha != "" {
-		fmt.Printf("%s -> committed %s\n", id, sha)
-	} else {
-		fmt.Printf("%s -> committed\n", id)
+	if !jsonOutput {
+		if sha != "" {
+			fmt.Printf("%s -> committed %s\n", id, sha)
+		} else {
+			fmt.Printf("%s -> committed\n", id)
+		}
 	}
 	return nil
 }

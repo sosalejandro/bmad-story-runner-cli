@@ -16,6 +16,16 @@ func newMarkStoryFileCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			patcher := infrastructure.NewMDStoryFilePatcher(log)
 			exitOnError(patcher.PatchStatus(args[0], args[1]))
+			if jsonOutput {
+				_ = emitJSONStdout(commandPathSansRoot(cmd),
+					map[string]any{"file_path": args[0], "status": args[1]},
+					map[string]any{
+						"ok":        true,
+						"file_path": args[0],
+						"status":    args[1],
+					}, nil)
+				return
+			}
 			fmt.Printf("Updated status in %s -> %s\n", args[0], args[1])
 		},
 	}

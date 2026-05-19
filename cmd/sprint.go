@@ -233,6 +233,10 @@ func newSprintPauseCmd() *cobra.Command {
 			if err := cfg.Set(ctx, sprintPausedKey, "true"); err != nil {
 				return err
 			}
+			if jsonOutput {
+				return emitJSONStdout(commandPathSansRoot(c), nil,
+					map[string]any{"ok": true, "paused": true}, nil)
+			}
 			fmt.Println("sprint paused (next iteration will exit gracefully)")
 			return nil
 		},
@@ -255,6 +259,10 @@ func newSprintResumeCmd() *cobra.Command {
 			cfg := sqlite.NewConfigStore(db)
 			if err := cfg.Delete(ctx, sprintPausedKey); err != nil {
 				return err
+			}
+			if jsonOutput {
+				return emitJSONStdout(commandPathSansRoot(c), nil,
+					map[string]any{"ok": true, "paused": false}, nil)
 			}
 			fmt.Println("sprint resumed")
 			return nil

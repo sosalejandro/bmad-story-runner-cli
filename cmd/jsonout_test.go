@@ -34,6 +34,11 @@ type envelopeShape struct {
 // so the global cobra command state doesn't leak between subtests — the
 // `--json` persistent flag, the `--state` flag, and the package-level
 // `jsonOutput` var would otherwise carry over.
+//
+// The `--state` flag is only injected for v6 commands (story / sprint /
+// dispatch / config). Legacy v4 namespaces like `mark-story-file` reject
+// the flag — for those, callers pass an empty dbPath and we skip the
+// state injection.
 func runCmdJSONCapture(t *testing.T, dbPath string, args ...string) (envelopeShape, []byte) {
 	t.Helper()
 
@@ -63,9 +68,17 @@ func runCmdJSONCapture(t *testing.T, dbPath string, args ...string) (envelopeSha
 	}
 	os.Stdout = w
 
-	// Always inject --no-log + --state so we don't touch ~/.bmad and so
-	// the command hits our temp DB.
-	full := append([]string{"--no-log", "--state", dbPath, "--json"}, args...)
+	// Always inject --no-log so we don't touch ~/.bmad. --state only
+	// applies to v6 namespaces — callers passing dbPath="" disable it.
+	full := []string{"--no-log", "--json"}
+	if dbPath != "" {
+		// --state is a *child* persistent flag on v6 subcommands; it
+		// must appear AFTER the subcommand name. Use BMAD_STATE env
+		// instead so it works for both v4 and v6 commands without
+		// needing per-subcommand wiring.
+		t.Setenv("BMAD_STATE", dbPath)
+	}
+	full = append(full, args...)
 	root.SetArgs(full)
 	// Suppress cobra's own stderr writes during the test — they'd pollute
 	// the captured stream. Subcommands that print to stderr (e.g. reaped
@@ -298,6 +311,108 @@ func TestJSON_ConfigAudit(t *testing.T) {
 	}
 	if orphans, ok := result["orphans"].([]any); !ok || len(orphans) != 0 {
 		t.Errorf("audit clean DB: orphans = %v, want []", result["orphans"])
+	}
+}
+
+// TestJSON_SprintPauseResume exercises the state-mutator pair under --json.
+// Both should emit {ok: true, paused: <bool>}. We chain pause→resume in
+// one test so a regression in either path surfaces here.
+func TestJSON_SprintPauseResume(t *testing.T) {
+	dbPath := seedStoriesForJSON(t)
+
+	envPause, _ := runCmdJSONCapture(t, dbPath, "sprint", "pause")
+	commonEnvelopeAssertions(t, envPause, "sprint pause")
+	var pauseR map[string]any
+	if err := json.Unmarshal(envPause.Result, &pauseR); err != nil {
+		t.Fatalf("pause unmarshal: %v", err)
+	}
+	if pauseR["ok"] != true || pauseR["paused"] != true {
+		t.Errorf("pause result wrong: %+v", pauseR)
+	}
+
+	envResume, _ := runCmdJSONCapture(t, dbPath, "sprint", "resume")
+	commonEnvelopeAssertions(t, envResume, "sprint resume")
+	var resumeR map[string]any
+	if err := json.Unmarshal(envResume.Result, &resumeR); err != nil {
+		t.Fatalf("resume unmarshal: %v", err)
+	}
+	if resumeR["ok"] != true || resumeR["paused"] != false {
+		t.Errorf("resume result wrong: %+v", resumeR)
+	}
+}
+
+// TestJSON_StorySetStatus verifies old_status reflects the pre-mutation
+// value and new_status reflects the requested status.
+func TestJSON_StorySetStatus(t *testing.T) {
+	dbPath := seedStoriesForJSON(t,
+		state.Story{ID: "5.1", Title: "x", Status: state.StatusPending, Complexity: state.ComplexityLow, StoryType: state.StoryTypeCode},
+	)
+	env, _ := runCmdJSONCapture(t, dbPath, "story", "set-status", "5.1", "in-progress")
+	commonEnvelopeAssertions(t, env, "story set-status")
+	var result map[string]any
+	if err := json.Unmarshal(env.Result, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result["ok"] != true {
+		t.Errorf("ok = %v, want true", result["ok"])
+	}
+	if result["old_status"] != "pending" {
+		t.Errorf("old_status = %v, want pending", result["old_status"])
+	}
+	if result["new_status"] != "in-progress" {
+		t.Errorf("new_status = %v, want in-progress", result["new_status"])
+	}
+}
+
+// TestJSON_StoryComplete (variadic) verifies a multi-id completion lists
+// every id in .result.completed.
+func TestJSON_StoryComplete(t *testing.T) {
+	dbPath := seedStoriesForJSON(t,
+		state.Story{ID: "6.1", Title: "a", Status: state.StatusPending, Complexity: state.ComplexityLow, StoryType: state.StoryTypeCode},
+		state.Story{ID: "6.2", Title: "b", Status: state.StatusPending, Complexity: state.ComplexityLow, StoryType: state.StoryTypeCode},
+	)
+	env, _ := runCmdJSONCapture(t, dbPath, "story", "complete", "6.1", "6.2")
+	commonEnvelopeAssertions(t, env, "story complete")
+	var result map[string]any
+	if err := json.Unmarshal(env.Result, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result["ok"] != true {
+		t.Errorf("ok = %v, want true", result["ok"])
+	}
+	completed, ok := result["completed"].([]any)
+	if !ok {
+		t.Fatalf("completed wrong type: %T", result["completed"])
+	}
+	if len(completed) != 2 || completed[0] != "6.1" || completed[1] != "6.2" {
+		t.Errorf("completed = %v, want [6.1 6.2]", completed)
+	}
+}
+
+// TestJSON_MarkStoryFile verifies the .md patcher emits an envelope with
+// the file_path + status echoed back. We write a minimal story file to a
+// tempdir so the patcher has something to mutate.
+func TestJSON_MarkStoryFile(t *testing.T) {
+	dir := t.TempDir()
+	storyFile := filepath.Join(dir, "story.md")
+	body := "# Story 1\n\n**Status:** pending\n\nbody\n"
+	if err := os.WriteFile(storyFile, []byte(body), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// mark-story-file is in the legacy v4 namespace — no --state required.
+	// We still pass a dbPath because runCmdJSONCapture always injects it.
+	dbPath := seedStoriesForJSON(t)
+	env, _ := runCmdJSONCapture(t, dbPath, "mark-story-file", storyFile, "complete")
+	commonEnvelopeAssertions(t, env, "mark-story-file")
+	var result map[string]any
+	if err := json.Unmarshal(env.Result, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result["ok"] != true {
+		t.Errorf("ok = %v, want true", result["ok"])
+	}
+	if result["file_path"] != storyFile {
+		t.Errorf("file_path = %v, want %s", result["file_path"], storyFile)
 	}
 }
 
