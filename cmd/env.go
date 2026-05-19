@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	appenv "github.com/sosalejandro/bmad-story-runner-cli/application/env"
+	"github.com/sosalejandro/bmad-story-runner-cli/cmd/exitcode"
 	"github.com/sosalejandro/bmad-story-runner-cli/domain/state"
 	"github.com/sosalejandro/bmad-story-runner-cli/infrastructure/state/sqlite"
 )
@@ -130,7 +131,7 @@ func newEnvStatusCmd() *cobra.Command {
 				a, err := envs.Get(ctx, args[0])
 				if errors.Is(err, state.ErrNotFound) {
 					fmt.Fprintf(os.Stderr, "env %q not found\n", args[0])
-					os.Exit(1)
+					os.Exit(exitcode.NotFound.Int())
 				}
 				if err != nil {
 					return err
