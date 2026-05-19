@@ -237,17 +237,44 @@ stage=hydrate AND status=ok.`,
 					}
 					return err
 				}
-				// Issue #21 gap 2: write stories.hydrated_file when this is
-				// a successful hydrate dispatch. Look up the row by key to
-				// learn its stage + story_id (the caller didn't provide
-				// them — that's the whole point of key-based recording).
-				if hydratedFile != "" {
+				// Look up the row once for any post-record state work that
+				// needs story_id / stage (hydrated-file + claim release).
+				var (
+					recorded   state.Dispatch
+					recordedOK bool
+				)
+				if hydratedFile != "" || status == state.DispatchOK {
 					d, gerr := store.GetByKey(ctx, idemKey)
 					if gerr != nil {
-						return fmt.Errorf("dispatch record: lookup dispatch by key for hydrated-file: %w", gerr)
+						// Lookup failure for the post-record bookkeeping is
+						// not fatal — the dispatch row IS recorded.
+						// Print a warning so an operator notices.
+						fmt.Fprintf(os.Stderr,
+							"WARN: dispatch %s recorded by key but follow-up lookup failed: %v\n",
+							idemKey, gerr)
+					} else {
+						recorded = d
+						recordedOK = true
 					}
-					if err := applyHydratedFile(ctx, stories, d.StoryID, d.Stage, status, hydratedFile, overwriteHydratedFile); err != nil {
+				}
+				// Issue #21 gap 2: write stories.hydrated_file when this is
+				// a successful hydrate dispatch.
+				if hydratedFile != "" && recordedOK {
+					if err := applyHydratedFile(ctx, stories, recorded.StoryID, recorded.Stage, status, hydratedFile, overwriteHydratedFile); err != nil {
 						return err
+					}
+				}
+				// Issue #21 gap 3 (a): auto-release the claim on success.
+				// Without this, crashed orchestrator sessions that never
+				// reached `bmad story complete` left stories permanently
+				// claimed.
+				if recordedOK {
+					if err := releaseClaimOnOK(ctx, stories, recorded.StoryID, status); err != nil {
+						// Release failure isn't fatal — the dispatch row IS
+						// recorded. Surface as a warning so the operator
+						// notices the stale claim and reaps manually if
+						// needed.
+						fmt.Fprintf(os.Stderr, "WARN: %v\n", err)
 					}
 				}
 				fmt.Printf("dispatch returned by key=%s: %s (tokens %d:%d:%d:%d, %dms)\n",
@@ -297,6 +324,10 @@ stage=hydrate AND status=ok.`,
 				if err := applyHydratedFile(ctx, stories, storyID, stage, status, hydratedFile, overwriteHydratedFile); err != nil {
 					return err
 				}
+			}
+			// Issue #21 gap 3 (a): auto-release the claim on success.
+			if err := releaseClaimOnOK(ctx, stories, storyID, status); err != nil {
+				fmt.Fprintf(os.Stderr, "WARN: %v\n", err)
 			}
 			fmt.Printf("dispatch %d recorded: %s/%s/%s (tokens %d:%d:%d:%d, %dms)\n",
 				id, storyID, stage, status,
@@ -353,6 +384,34 @@ func applyHydratedFile(
 			return fmt.Errorf("dispatch record: stories.hydrated_file already populated for %q; pass --overwrite-hydrated-file to replace", storyID)
 		}
 		return fmt.Errorf("dispatch record: set hydrated_file: %w", err)
+	}
+	return nil
+}
+
+// releaseClaimOnOK is the seam for issue #21 gap 3 (a): a successful
+// dispatch frees its claim so the next orchestrator iteration is free to
+// pick the story again (or move it to the next stage). Idempotent — the
+// underlying ReleaseClaim is safe to call on an already-clear row.
+// Returns nil even when status != ok (the caller always invokes it; the
+// gate lives here so the cmd body stays linear).
+//
+// Defensive: a ReleaseClaim error never blocks the dispatch from being
+// considered "recorded" — we WARN instead, because the row is already in
+// SQLite and rolling back the claim release would be the inverse of the
+// intent (leaving a stale claim).
+func releaseClaimOnOK(
+	ctx context.Context,
+	stories interface {
+		ReleaseClaim(ctx context.Context, id string) error
+	},
+	storyID string,
+	status state.DispatchStatus,
+) error {
+	if status != state.DispatchOK {
+		return nil
+	}
+	if err := stories.ReleaseClaim(ctx, storyID); err != nil {
+		return fmt.Errorf("dispatch record: release claim for %q: %w", storyID, err)
 	}
 	return nil
 }

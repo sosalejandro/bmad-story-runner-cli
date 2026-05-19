@@ -226,7 +226,15 @@ func newStoryNextCmd() *cobra.Command {
 With --claim, atomically marks the picked stories claimed_at + claimed_by
 in a single transaction so two orchestrator iterations cannot both pick the
 same story. Always pass --claim in production orchestrator loops — the only
-no-claim use case is read-only inspection.`,
+no-claim use case is read-only inspection.
+
+Stale-claim reaping (issue #21 gap 3): before scanning candidates, any
+claim older than config.claim_ttl_seconds (default 600s) on a
+non-complete story is cleared so a crashed orchestrator session doesn't
+permanently lock the story. Reaped ids print a one-line warning to
+stderr; the JSON envelope on stdout lists them in reaped_claims so
+downstream telemetry can count them. Set claim_ttl_seconds=0 in config
+to disable the reaper.`,
 		RunE: func(c *cobra.Command, args []string) error {
 			ctx := context.Background()
 			svc, cleanup, err := openStoryService(ctx)
@@ -234,6 +242,21 @@ no-claim use case is read-only inspection.`,
 				return err
 			}
 			defer cleanup()
+
+			// Issue #21 gap 3 (b): reap stale claims first so a stuck story
+			// becomes eligible on the same `bmad story next` invocation
+			// that exposes the gap. Operator gets a warning per reaped id —
+			// silence here would mask the orchestrator-crash residue.
+			ttl := effectiveClaimTTL(ctx, svc)
+			reaped, err := svc.Stories.ReapStaleClaims(ctx, ttl)
+			if err != nil {
+				return fmt.Errorf("story next: reap stale claims: %w", err)
+			}
+			for _, id := range reaped {
+				fmt.Fprintf(os.Stderr,
+					"WARN: reaped stale claim on %s (age > %ds; assuming orchestrator crash)\n",
+					id, ttl)
+			}
 
 			actions, err := svc.Next(ctx, max)
 			if err != nil {
@@ -269,9 +292,11 @@ no-claim use case is read-only inspection.`,
 			}
 
 			return json.NewEncoder(os.Stdout).Encode(map[string]any{
-				"max":     max,
-				"claimed": claim,
-				"actions": actions,
+				"max":             max,
+				"claimed":         claim,
+				"actions":         actions,
+				"reaped_claims":   reaped,
+				"claim_ttl_seconds": ttl,
 			})
 		},
 	}
@@ -279,6 +304,29 @@ no-claim use case is read-only inspection.`,
 	cmd.Flags().BoolVar(&claim, "claim", true, "atomically claim returned stories (set claimed_at + claimed_by)")
 	cmd.Flags().StringVar(&claimer, "claimer", "orchestrator", "claimed_by value (e.g. session id)")
 	return cmd
+}
+
+// DefaultClaimTTLSeconds is used when config.claim_ttl_seconds is unset.
+// 10 minutes is conservative enough to not race a slow but still-running
+// dispatch, yet short enough to reap quickly after a real crash.
+const DefaultClaimTTLSeconds = 600
+
+// effectiveClaimTTL reads config.claim_ttl_seconds. Returns
+// DefaultClaimTTLSeconds when unset or unparseable. Returns 0 (which
+// disables the reaper) only when the config row is explicitly "0".
+func effectiveClaimTTL(ctx context.Context, svc *appstate.StoryService) int {
+	v, err := svc.Config.Get(ctx, "claim_ttl_seconds")
+	if err != nil {
+		return DefaultClaimTTLSeconds
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return DefaultClaimTTLSeconds
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 // ---------- checkpoint ----------

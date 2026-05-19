@@ -47,6 +47,18 @@ type Stories interface {
 	// called on completion, on error-after-claim, or by the orchestrator's
 	// crash-resume reconciler when it decides to give a story back.
 	ReleaseClaim(ctx context.Context, id string) error
+
+	// ReapStaleClaims clears claimed_at + claimed_by for stories whose
+	// claim is older than ttlSeconds AND whose status is NOT complete.
+	// Returns the ids that were reaped (caller emits a warning per id so
+	// an operator can see the orchestrator-crash residue being cleaned up).
+	// Issue #21 gap 3 — bare-minimum recovery path so a crashed
+	// orchestrator session doesn't permanently lock a story.
+	//
+	// Skipping complete stories is deliberate: SetComplete already clears
+	// the claim, so a stale-but-complete row is a no-op; not reaping it
+	// keeps the audit trail of who finished it.
+	ReapStaleClaims(ctx context.Context, ttlSeconds int) ([]string, error)
 }
 
 // StoryDependencies is the m:n bridge between a story and its prerequisites.

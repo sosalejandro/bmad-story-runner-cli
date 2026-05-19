@@ -7,9 +7,25 @@ import (
 	"path/filepath"
 	"testing"
 
+	appstate "github.com/sosalejandro/bmad-story-runner-cli/application/state"
 	"github.com/sosalejandro/bmad-story-runner-cli/domain/state"
 	"github.com/sosalejandro/bmad-story-runner-cli/infrastructure/state/sqlite"
 )
+
+// newStoryServiceForTest assembles a StoryService backed by sqlite stores —
+// used by tests that exercise cmd-layer helpers (effectiveClaimTTL,
+// stale-claim reaping at the cmd boundary).
+func newStoryServiceForTest(db *sqlite.DB) *appstate.StoryService {
+	return &appstate.StoryService{
+		Stories:      sqlite.NewStoriesStore(db),
+		Dependencies: sqlite.NewStoryDependenciesStore(db),
+		Affects:      sqlite.NewStoryAffectsStore(db),
+		Concerns:     sqlite.NewStoryConcernsStore(db),
+		RetryCounts:  sqlite.NewStoryRetryCountsStore(db),
+		Config:       sqlite.NewConfigStore(db),
+		Checkpoints:  sqlite.NewCheckpointsStore(db),
+	}
+}
 
 // Issue #21 gap 2: `bmad dispatch record --hydrated-file` must (a) write
 // stories.hydrated_file when stage=hydrate AND status=ok, (b) reject
@@ -128,6 +144,114 @@ func TestApplyHydratedFile_RejectsNonHydrateOrNonOK(t *testing.T) {
 				t.Fatalf("expected error for stage=%s status=%s, got nil", tc.stage, tc.status)
 			}
 		})
+	}
+}
+
+// Issue #21 gap 3 (a): a successful dispatch must release the story's
+// claim so the next orchestrator iteration can advance the story (or
+// move on). The pre-fix state was: hydrate-success dispatch recorded ok,
+// but `claimed_at` stayed populated, so `bmad story next` continued to
+// skip the story until an operator ran raw SQL.
+func TestReleaseClaimOnOK_ClearsClaimOnSuccess(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "bmad-state.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	stories := sqlite.NewStoriesStore(db)
+	if err := stories.Insert(ctx, state.Story{
+		ID: "2.1", Title: "x", Status: state.StatusPending,
+		Complexity: state.ComplexityMedium, StoryType: state.StoryTypeCode,
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Simulate the orchestrator claim path.
+	if _, err := stories.ClaimUnclaimedPending(ctx, []string{"2.1"}, 1, "orchestrator"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	pre, _ := stories.Get(ctx, "2.1")
+	if pre.ClaimedAt == nil {
+		t.Fatal("setup precondition: 2.1 should be claimed")
+	}
+
+	if err := releaseClaimOnOK(ctx, stories, "2.1", state.DispatchOK); err != nil {
+		t.Fatalf("releaseClaimOnOK: %v", err)
+	}
+
+	post, _ := stories.Get(ctx, "2.1")
+	if post.ClaimedAt != nil {
+		t.Errorf("claim not cleared on ok: %v", post.ClaimedAt)
+	}
+}
+
+// Inverse: blocked / errored dispatches MUST NOT release the claim. The
+// orchestrator might want to retry (still holds the claim) or surface to
+// the user for a decision. Auto-releasing would race a follow-up retry.
+func TestReleaseClaimOnOK_PreservesClaimOnNonOK(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "bmad-state.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	stories := sqlite.NewStoriesStore(db)
+	if err := stories.Insert(ctx, state.Story{
+		ID: "z", Title: "x", Status: state.StatusPending,
+		Complexity: state.ComplexityMedium, StoryType: state.StoryTypeCode,
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := stories.ClaimUnclaimedPending(ctx, []string{"z"}, 1, "orchestrator"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	for _, st := range []state.DispatchStatus{state.DispatchBlocked, state.DispatchErrored} {
+		if err := releaseClaimOnOK(ctx, stories, "z", st); err != nil {
+			t.Errorf("releaseClaimOnOK(%s) returned error: %v", st, err)
+		}
+		got, _ := stories.Get(ctx, "z")
+		if got.ClaimedAt == nil {
+			t.Errorf("status=%s wrongly cleared the claim", st)
+		}
+	}
+}
+
+// effectiveClaimTTL: config-driven knob with sensible fallback. Operators
+// can tune via `bmad config set claim_ttl_seconds <n>`; a missing or
+// malformed value falls back to DefaultClaimTTLSeconds; an explicit "0"
+// disables the reaper.
+func TestEffectiveClaimTTL_FallbackBehavior(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "bmad-state.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	svc := newStoryServiceForTest(db)
+
+	// Unset → default.
+	if got := effectiveClaimTTL(ctx, svc); got != DefaultClaimTTLSeconds {
+		t.Errorf("unset: ttl = %d, want %d", got, DefaultClaimTTLSeconds)
+	}
+	// Bad value → default (resilient to admin typos).
+	_ = svc.Config.Set(ctx, "claim_ttl_seconds", "not-a-number")
+	if got := effectiveClaimTTL(ctx, svc); got != DefaultClaimTTLSeconds {
+		t.Errorf("bad: ttl = %d, want %d", got, DefaultClaimTTLSeconds)
+	}
+	// Explicit "0" → disabled.
+	_ = svc.Config.Set(ctx, "claim_ttl_seconds", "0")
+	if got := effectiveClaimTTL(ctx, svc); got != 0 {
+		t.Errorf("zero: ttl = %d, want 0", got)
+	}
+	// Explicit "300" → 300.
+	_ = svc.Config.Set(ctx, "claim_ttl_seconds", "300")
+	if got := effectiveClaimTTL(ctx, svc); got != 300 {
+		t.Errorf("300: ttl = %d, want 300", got)
 	}
 }
 
