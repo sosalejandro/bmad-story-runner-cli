@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/sosalejandro/bmad-story-runner-cli/application"
+	"github.com/sosalejandro/bmad-story-runner-cli/cmd/exitcode"
 	"github.com/sosalejandro/bmad-story-runner-cli/domain"
 	"github.com/sosalejandro/bmad-story-runner-cli/infrastructure"
 )
@@ -33,7 +34,7 @@ func newNextCmd() *cobra.Command {
 			if err != nil {
 				if errors.Is(err, domain.ErrNoEligibleStory) {
 					fmt.Fprintln(os.Stderr, "NONE: no eligible story found")
-					os.Exit(2)
+					os.Exit(exitcode.NoResult.Int())
 				}
 				exitOnError(err)
 			}

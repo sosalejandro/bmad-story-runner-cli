@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sosalejandro/bmad-story-runner-cli/cmd/exitcode"
 	"github.com/sosalejandro/bmad-story-runner-cli/domain/state"
 	"github.com/sosalejandro/bmad-story-runner-cli/infrastructure/state/sqlite"
 )
@@ -216,7 +217,7 @@ func getOneConfig(ctx context.Context, cfg state.Config, key string) error {
 	v, err := cfg.Get(ctx, key)
 	if errors.Is(err, state.ErrNotFound) {
 		fmt.Fprintf(os.Stderr, "config: key %q not set\n", key)
-		os.Exit(1)
+		os.Exit(exitcode.NotFound.Int())
 	}
 	if err != nil {
 		return err

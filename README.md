@@ -54,6 +54,62 @@ go install github.com/sosalejandro/bmad-story-runner-cli/cmd/bmad@latest
 
 Requires Go 1.24+. The binary is installed as `bmad`. Add `$(go env GOPATH)/bin` to your `$PATH` if not already present.
 
+## For AI agents
+
+`bmad` is designed to be a first-class tool for AI coding agents (Claude Code, Cursor, etc.). Three surfaces matter most:
+
+### Stable exit codes
+
+Every command exits with a documented code an agent can branch on. The full table prints from `bmad doctor` (and is also embedded in `--help-json`):
+
+| Code | Name              | Meaning                                                   |
+|-----:|-------------------|-----------------------------------------------------------|
+|    0 | `SUCCESS`         | Command completed                                         |
+|    1 | `USER_ERROR`      | Generic / unclassified user failure                       |
+|    2 | `NO_RESULT`       | Succeeded but no result (e.g. `bmad next` no eligible)    |
+|   10 | `ARGS_ERROR`      | Missing/malformed argument or flag                        |
+|   20 | `SYSTEM_ERROR`    | I/O, fs, or environment failure                           |
+|   30 | `VALIDATION_ERROR`| Input parsed but rejected by a business rule              |
+|   40 | `NOT_FOUND`       | Referenced resource does not exist                        |
+|   50 | `CONFLICT`        | State-mutating call collides with prior state             |
+
+These integers are part of the public contract — they will not change without a major-version bump.
+
+### `bmad doctor` — environment self-check
+
+Before running any other command, an orchestrator can call `bmad doctor` to verify its host is healthy:
+
+```bash
+bmad doctor              # human-readable report
+bmad doctor --json       # machine-readable (envelope schema v1)
+```
+
+Probes:
+- `bmad` binary version (warns if built without `-ldflags`)
+- Go runtime version
+- `atlas` binary on `$PATH` (required for `bmad sprint plan`)
+- `bmad-state.db` resolution + schema_version
+
+Exits `20` (`SYSTEM_ERROR`) on any failed probe; `0` otherwise (warnings stay 0).
+
+### `--help-json` — machine-readable command tree
+
+```bash
+bmad --help-json                  # emit entire CLI tree as JSON
+bmad doctor --help-json           # same — works from any subcommand
+```
+
+Output shape (envelope schema v1) includes every command, alias, flag (with type + default), and persistent flag, sorted alphabetically for deterministic `jq` queries.
+
+### Idempotency surface
+
+State-mutating commands that already support idempotency keys (re-running with the same key is safe):
+- `bmad dispatch begin` — emits a UUID `idempotency_key`
+- `bmad dispatch record --key <k>` — re-records are no-ops against the same payload
+- `bmad render --idempotency-key <k>` — key injected into the rendered prompt
+
+`bmad doctor` prints this surface alongside the exit-code table.
+
 ## Architecture
 
 Hexagonal architecture with four layers:
@@ -608,14 +664,16 @@ Full reference: [docs/logging.md](docs/logging.md)
 
 ## Error Handling
 
-All commands exit non-zero on error and log structured errors via `uber/zap`. Sentinel errors are used for type-safe checking:
+All commands exit non-zero on error and log structured errors via `uber/zap`. Sentinel errors are used for type-safe checking; exit codes are defined in [`cmd/exitcode`](cmd/exitcode/codes.go) and documented in [For AI agents](#for-ai-agents) above.
 
 | Sentinel | Meaning | Exit code |
 |---|---|---|
-| `ErrStoryNotFound` | Story ID not in progress file | 1 |
-| `ErrInvalidStatus` | Bad status string | 1 |
-| `ErrInvalidGateResult` | Bad gate value in YAML | 1 |
-| `ErrNoEligibleStory` | No pending story available | 2 |
+| `ErrStoryNotFound` | Story ID not in progress file | 40 (`NOT_FOUND`) |
+| `ErrInvalidStatus` | Bad status string | 30 (`VALIDATION_ERROR`) |
+| `ErrInvalidGateResult` | Bad gate value in YAML | 30 (`VALIDATION_ERROR`) |
+| `ErrNoEligibleStory` | No pending story available | 2 (`NO_RESULT`) |
+
+Existing call sites continue to exit `1` (`USER_ERROR`) for backwards compatibility; new code should prefer the typed codes from `cmd/exitcode`.
 
 ## Development
 
