@@ -83,6 +83,9 @@ func newConfigGetCmd() *cobra.Command {
 			defer db.Close()
 			cfg := sqlite.NewConfigStore(db)
 			warnConfigFootguns(ctx, cfg)
+			if jsonOutput {
+				return emitConfigGetJSON(ctx, c, cfg, args[0])
+			}
 			return getOneConfig(ctx, cfg, args[0])
 		},
 	}
@@ -102,6 +105,9 @@ func newConfigSetCmd() *cobra.Command {
 			defer db.Close()
 			cfg := sqlite.NewConfigStore(db)
 			warnConfigFootguns(ctx, cfg)
+			if jsonOutput {
+				return emitConfigSetJSON(ctx, c, cfg, args[0], args[1])
+			}
 			return setOneConfig(ctx, cfg, args[0], args[1])
 		},
 	}
@@ -129,6 +135,9 @@ or a direct sqlite DELETE to remove them after review.`,
 			orphans, err := findConfigFootguns(ctx, cfg)
 			if err != nil {
 				return err
+			}
+			if jsonOutput {
+				return emitConfigAuditJSON(c, orphans)
 			}
 			if len(orphans) == 0 {
 				fmt.Println("config audit: clean (no orphan keys matching the #16 footgun pattern)")

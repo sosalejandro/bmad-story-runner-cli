@@ -204,6 +204,103 @@ func TestJSON_StoryNext(t *testing.T) {
 	}
 }
 
+// TestJSON_StoryHydrate verifies `bmad story hydrate --json` wraps the
+// dispatch instruction in the envelope. Story must exist or hydrate
+// rejects.
+func TestJSON_StoryHydrate(t *testing.T) {
+	dbPath := seedStoriesForJSON(t,
+		state.Story{ID: "3.1", Title: "x", Status: state.StatusPending, Complexity: state.ComplexityMedium, StoryType: state.StoryTypeCode},
+	)
+	env, _ := runCmdJSONCapture(t, dbPath, "story", "hydrate", "3.1")
+	commonEnvelopeAssertions(t, env, "story hydrate")
+	var result map[string]string
+	if err := json.Unmarshal(env.Result, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result["action"] != "dispatch" || result["story_id"] != "3.1" {
+		t.Errorf("hydrate result wrong: %+v", result)
+	}
+}
+
+// TestJSON_StoryApplicableStages verifies the per-story stage planner
+// emits its ordered slices under .result.{applicable,skipped}.
+func TestJSON_StoryApplicableStages(t *testing.T) {
+	dbPath := seedStoriesForJSON(t,
+		state.Story{ID: "4.1", Title: "x", Status: state.StatusPending, Complexity: state.ComplexityLow, StoryType: state.StoryTypeCode},
+	)
+	env, _ := runCmdJSONCapture(t, dbPath, "story", "applicable-stages", "4.1")
+	commonEnvelopeAssertions(t, env, "story applicable-stages")
+	var result map[string]any
+	if err := json.Unmarshal(env.Result, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := result["applicable"].([]any); !ok {
+		t.Errorf("result.applicable wrong type: %T", result["applicable"])
+	}
+	if result["story_id"] != "4.1" {
+		t.Errorf("result.story_id = %v, want 4.1", result["story_id"])
+	}
+}
+
+// TestJSON_ConfigGetSet exercises both the read + write paths in one
+// flow. Confirms previous_value reflects the prior write.
+func TestJSON_ConfigGetSet(t *testing.T) {
+	dbPath := seedStoriesForJSON(t)
+
+	// First set — no prior value.
+	envSet, _ := runCmdJSONCapture(t, dbPath, "config", "set", "mode", "pragmatic")
+	commonEnvelopeAssertions(t, envSet, "config set")
+	var setResult map[string]any
+	if err := json.Unmarshal(envSet.Result, &setResult); err != nil {
+		t.Fatalf("set unmarshal: %v", err)
+	}
+	if setResult["ok"] != true {
+		t.Errorf("set.ok = %v, want true", setResult["ok"])
+	}
+	if setResult["previous_value"] != nil {
+		t.Errorf("set.previous_value = %v, want nil (first write)", setResult["previous_value"])
+	}
+
+	// Get returns the set value.
+	envGet, _ := runCmdJSONCapture(t, dbPath, "config", "get", "mode")
+	commonEnvelopeAssertions(t, envGet, "config get")
+	var getResult map[string]any
+	if err := json.Unmarshal(envGet.Result, &getResult); err != nil {
+		t.Fatalf("get unmarshal: %v", err)
+	}
+	if getResult["value"] != "pragmatic" {
+		t.Errorf("get.value = %v, want pragmatic", getResult["value"])
+	}
+
+	// Second set — should report the prior value.
+	envSet2, _ := runCmdJSONCapture(t, dbPath, "config", "set", "mode", "strict")
+	var set2Result map[string]any
+	if err := json.Unmarshal(envSet2.Result, &set2Result); err != nil {
+		t.Fatalf("set2 unmarshal: %v", err)
+	}
+	if set2Result["previous_value"] != "pragmatic" {
+		t.Errorf("set2.previous_value = %v, want pragmatic", set2Result["previous_value"])
+	}
+}
+
+// TestJSON_ConfigAudit verifies the orphan-keys audit emits the expected
+// {count, orphans[]} shape when no orphans exist.
+func TestJSON_ConfigAudit(t *testing.T) {
+	dbPath := seedStoriesForJSON(t)
+	env, _ := runCmdJSONCapture(t, dbPath, "config", "audit")
+	commonEnvelopeAssertions(t, env, "config audit")
+	var result map[string]any
+	if err := json.Unmarshal(env.Result, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result["count"].(float64) != 0 {
+		t.Errorf("audit clean DB: count = %v, want 0", result["count"])
+	}
+	if orphans, ok := result["orphans"].([]any); !ok || len(orphans) != 0 {
+		t.Errorf("audit clean DB: orphans = %v, want []", result["orphans"])
+	}
+}
+
 // TestJSON_SprintStatus exercises `bmad sprint status --json`. The DB is
 // nearly empty — we just want to confirm the envelope wraps the report
 // map without losing keys.

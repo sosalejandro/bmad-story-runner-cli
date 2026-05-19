@@ -141,6 +141,16 @@ Safety rails (issue #14):
 				res.Scope = scope
 				res.StoriesSkippedByScope = totalBeforeScope - len(parsed)
 			}
+			if jsonOutput {
+				args := map[string]any{}
+				if scope != "" {
+					args["scope"] = scope
+				}
+				if maxP > 0 {
+					args["max_parallel"] = maxP
+				}
+				return emitJSONStdout(commandPathSansRoot(c), args, res, nil)
+			}
 			return json.NewEncoder(os.Stdout).Encode(res)
 		},
 	}

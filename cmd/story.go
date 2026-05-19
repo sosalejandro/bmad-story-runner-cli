@@ -214,12 +214,17 @@ agent returns produces the same instruction.`,
 			if err := svc.Stories.SetCurrentStage(ctx, id, &stage); err != nil {
 				return err
 			}
-			return json.NewEncoder(os.Stdout).Encode(map[string]string{
+			result := map[string]string{
 				"action":   "dispatch",
 				"agent":    "story-hydrator",
 				"story_id": id,
 				"stage":    string(stage),
-			})
+			}
+			if jsonOutput {
+				return emitJSONStdout(commandPathSansRoot(c),
+					map[string]any{"story_id": id}, result, nil)
+			}
+			return json.NewEncoder(os.Stdout).Encode(result)
 		},
 	}
 }
@@ -627,13 +632,19 @@ discovering "this stage is N/A for this story" at runtime.`,
 				skippedStrs = append(skippedStrs, string(s))
 			}
 
-			return json.NewEncoder(os.Stdout).Encode(map[string]any{
+			result := map[string]any{
 				"story_id":   st.ID,
 				"story_type": string(st.StoryType),
 				"mode":       string(effectiveMode),
 				"applicable": applicableStrs,
 				"skipped":    skippedStrs,
-			})
+			}
+			if jsonOutput {
+				return emitJSONStdout(commandPathSansRoot(c),
+					map[string]any{"story_id": st.ID, "mode": string(effectiveMode)},
+					result, nil)
+			}
+			return json.NewEncoder(os.Stdout).Encode(result)
 		},
 	}
 	cmd.Flags().StringVar(&mode, "mode", "", "override mode (default: from config.mode)")
