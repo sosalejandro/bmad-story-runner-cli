@@ -1,6 +1,7 @@
 package prompts_test
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -434,5 +435,174 @@ func TestRender_CacheInvariance_PriorAttempt_DoesNotBustPrefix(t *testing.T) {
 	}
 	if extractStablePrefix(t, a) != extractStablePrefix(t, b) {
 		t.Fatalf("prefix changed when PriorAttempt was added — retry context must live in suffix")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TOKEN_BREAKDOWN instruction (issue #20)
+//
+// Every stage_*.tmpl must include the token-breakdown reporting partial in
+// its suffix so the L3 agent emits a parseable usage line as the last line
+// of its response. The L1 orchestrator's parser regex is the contract.
+
+// tokenBreakdownAnchor is the literal anchor the L1 orchestrator's parser
+// matches against. Must stay in sync with the partial template
+// `infrastructure/prompts/templates/token_breakdown_instruction.tmpl`.
+const tokenBreakdownAnchor = "TOKEN_BREAKDOWN: input=N output=N cache_read=N cache_create=N"
+
+// tokenBreakdownParseRegex is the exact regex shape the orchestrator parses
+// off the L3 agent's response. Matches `^TOKEN_BREAKDOWN: input=\d+ output=\d+ cache_read=\d+ cache_create=\d+`.
+// This test only validates the regex compiles + matches a synthetic line —
+// the real consumer is the orchestrator skill in nutrition develop.
+var tokenBreakdownParseRegex = regexp.MustCompile(`(?m)^TOKEN_BREAKDOWN: input=(\d+) output=(\d+) cache_read=(\d+) cache_create=(\d+)\s*$`)
+
+func TestRender_TokenBreakdownInstruction_PresentInEveryStage(t *testing.T) {
+	t.Parallel()
+	r := newRenderer(t)
+
+	envCommon := map[string]any{"PgPort": 7611, "RedisPort": 7612, "OtelPort": 7613, "DbName": "story_x"}
+	cases := []struct {
+		stage string
+		data  map[string]any
+	}{
+		{"stage_hydrate", map[string]any{
+			"StoryID": "1.1", "Mode": "pragmatic",
+			"EpicsPath": "/p/epics.md", "ArchitecturePath": "/p/arch.md",
+			"HydratedFile": "/p/1.1.md",
+		}},
+		{"stage_atdd", map[string]any{
+			"StoryID": "1.1", "HydratedFile": "/p/1.1.md", "Mode": "strict",
+			"EnvConfig": envCommon,
+		}},
+		{"stage_automate", map[string]any{
+			"StoryID": "1.1", "HydratedFile": "/p/1.1.md", "Mode": "strict",
+			"EnvConfig": envCommon,
+		}},
+		{"stage_implement", map[string]any{
+			"StoryID": "1.1", "HydratedFile": "/p/1.1.md", "Mode": "pragmatic",
+			"EnvConfig": envCommon,
+		}},
+		{"stage_test_review", map[string]any{
+			"StoryID": "1.1", "HydratedFile": "/p/1.1.md", "Mode": "strict",
+			"EnvConfig": envCommon,
+		}},
+		{"stage_code_review", map[string]any{
+			"StoryID": "1.1", "HydratedFile": "/p/1.1.md", "Mode": "pragmatic",
+			"Iteration": 1, "MaxIterations": 3, "EnvConfig": envCommon,
+		}},
+		{"stage_commit", map[string]any{
+			"StoryID": "1.1", "HydratedFile": "/p/1.1.md", "Mode": "pragmatic",
+			"Branch": "fix/x",
+		}},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.stage, func(t *testing.T) {
+			t.Parallel()
+			out, err := r.Render(c.stage, c.data)
+			if err != nil {
+				t.Fatalf("render %s: %v", c.stage, err)
+			}
+			if !strings.Contains(out, tokenBreakdownAnchor) {
+				t.Fatalf("%s: rendered prompt missing TOKEN_BREAKDOWN instruction anchor %q\n--- output ---\n%s",
+					c.stage, tokenBreakdownAnchor, out)
+			}
+			// The instruction must live in the SUFFIX, not the PREFIX —
+			// the partial is shared text but its placement must be below
+			// the cache boundary so an unbundled prompt-cache prefix
+			// still benefits from anything above the marker.
+			if idxMarker := strings.Index(out, stageCacheBoundaryMarker); idxMarker >= 0 {
+				idxAnchor := strings.Index(out, tokenBreakdownAnchor)
+				if idxAnchor < idxMarker {
+					t.Fatalf("%s: TOKEN_BREAKDOWN anchor appears BEFORE cache boundary — instruction must be in the suffix to preserve prefix invariance",
+						c.stage)
+				}
+			}
+		})
+	}
+}
+
+func TestTokenBreakdownParseRegex_MatchesSyntheticAgentLine(t *testing.T) {
+	t.Parallel()
+	// Sanity: the regex shape the orchestrator parser uses must actually
+	// match a well-formed line. Pins the contract so a future template
+	// edit can't silently rename a field without breaking this test.
+	cases := []struct {
+		name string
+		line string
+		want [4]string // input, output, cache_read, cache_create
+	}{
+		{"happy path", "TOKEN_BREAKDOWN: input=12345 output=678 cache_read=9000 cache_create=4321", [4]string{"12345", "678", "9000", "4321"}},
+		{"all zeros", "TOKEN_BREAKDOWN: input=0 output=0 cache_read=0 cache_create=0", [4]string{"0", "0", "0", "0"}},
+		{"trailing newline", "TOKEN_BREAKDOWN: input=1 output=2 cache_read=3 cache_create=4\n", [4]string{"1", "2", "3", "4"}},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			m := tokenBreakdownParseRegex.FindStringSubmatch(c.line)
+			if m == nil {
+				t.Fatalf("no match for %q", c.line)
+			}
+			got := [4]string{m[1], m[2], m[3], m[4]}
+			if got != c.want {
+				t.Fatalf("submatch mismatch: got %v want %v", got, c.want)
+			}
+		})
+	}
+
+	// Negative cases — must NOT match.
+	neg := []string{
+		"TOKEN_BREAKDOWN: input=unknown output=0 cache_read=0 cache_create=0",
+		"TOKEN_BREAKDOWN input=1 output=2 cache_read=3 cache_create=4", // missing colon
+		"token_breakdown: input=1 output=2 cache_read=3 cache_create=4", // wrong case
+		"prefix TOKEN_BREAKDOWN: input=1 output=2 cache_read=3 cache_create=4", // not anchored start-of-line
+	}
+	for _, s := range neg {
+		if tokenBreakdownParseRegex.FindString(s) != "" {
+			t.Errorf("regex unexpectedly matched %q", s)
+		}
+	}
+}
+
+// The TOKEN_BREAKDOWN instruction adds STATIC text — it must not bust the
+// cache-invariance contract for any stage. Re-runs the cross-story prefix
+// check against a stage to confirm the partial doesn't introduce per-call
+// drift.
+func TestRender_TokenBreakdownInstruction_DoesNotBustCacheInvariance(t *testing.T) {
+	t.Parallel()
+	r := newRenderer(t)
+	for _, stage := range []string{"stage_implement", "stage_hydrate", "stage_code_review", "stage_commit"} {
+		stage := stage
+		t.Run(stage, func(t *testing.T) {
+			t.Parallel()
+			a := map[string]any{
+				"StoryID": "1.1", "HydratedFile": "/p/1.1.md", "Mode": "pragmatic",
+				"EnvConfig": map[string]any{"PgPort": 7611, "DbName": "story_a"},
+				"EpicsPath": "/p/epics.md", "ArchitecturePath": "/p/arch.md",
+				"Branch":    "fix/x", "Iteration": 1, "MaxIterations": 3,
+			}
+			b := map[string]any{
+				"StoryID": "9.9", "HydratedFile": "/q/9.9.md", "Mode": "strict",
+				"EnvConfig": map[string]any{"PgPort": 7801, "DbName": "story_b"},
+				"EpicsPath": "/q/epics.md", "ArchitecturePath": "/q/arch.md",
+				"Branch":    "fix/y", "Iteration": 2, "MaxIterations": 3,
+			}
+			ra, err := r.Render(stage, a)
+			if err != nil {
+				t.Fatalf("render A (%s): %v", stage, err)
+			}
+			rb, err := r.Render(stage, b)
+			if err != nil {
+				t.Fatalf("render B (%s): %v", stage, err)
+			}
+			if extractStablePrefix(t, ra) != extractStablePrefix(t, rb) {
+				t.Fatalf("%s: prefix diverged after TOKEN_BREAKDOWN partial was added", stage)
+			}
+			// Both renders must contain the instruction (defense-in-depth).
+			if !strings.Contains(ra, tokenBreakdownAnchor) || !strings.Contains(rb, tokenBreakdownAnchor) {
+				t.Errorf("%s: TOKEN_BREAKDOWN instruction missing from one of the renders", stage)
+			}
+		})
 	}
 }

@@ -1,0 +1,58 @@
+{{/* Slot contract: none — this partial is byte-identical across every call.
+
+       Goal: instruct the L3 stage agent to surface its own usage breakdown
+       in a single literal line that the L1 orchestrator can parse with a
+       regex. Closes bmad-cli#20 — Claude Code's Task tool result exposes
+       only `total_tokens` to the parent session; the
+       `cache_read_input_tokens` / `cache_creation_input_tokens` fields
+       needed to compute `cache_hit_rate` are not surfaced, so we route
+       them through the agent's text response instead.
+
+       Format (REGEX-anchored, must match `^TOKEN_BREAKDOWN: input=\d+ output=\d+ cache_read=\d+ cache_create=\d+`):
+
+           TOKEN_BREAKDOWN: input=N output=N cache_read=N cache_create=N
+
+       This partial is included at the SUFFIX of every stage_*.tmpl —
+       below the per-story variable content. Because the text is
+       byte-identical across every dispatch, placement does NOT bust the
+       cache-stable prefix established by Batch E.
+*/ -}}
+
+## Final reporting — emit a TOKEN_BREAKDOWN line as the very last line of your response
+
+After your usual structured JSON return (and any prose summary), the
+**final line** of your response MUST be a single literal line in this
+exact format:
+
+```
+TOKEN_BREAKDOWN: input=N output=N cache_read=N cache_create=N
+```
+
+Where each `N` is a non-negative integer drawn from your own usage
+metadata for THIS subagent invocation:
+
+- `input` — total input tokens for this call (system prompt + tool
+  defs + user message + tool results consumed during the run)
+- `output` — total output tokens you generated (assistant turns +
+  tool calls)
+- `cache_read` — input tokens served from the prompt-prefix cache
+  (i.e. `cache_read_input_tokens`)
+- `cache_create` — input tokens written to a new cache entry on this
+  call (i.e. `cache_creation_input_tokens`)
+
+If you cannot determine a specific field for this invocation, emit
+`0` for it (NOT `unknown`, NOT a placeholder) — the orchestrator's
+parser is a strict regex that expects integers. A best-effort estimate
+beats `0` when you have a signal (e.g., your context window
+introspection tools report a figure), but never invent values.
+
+The line must be the LITERAL last line — no trailing prose, no code
+fence, no markdown bullet. The orchestrator's L1 parser matches the
+anchor `^TOKEN_BREAKDOWN: input=` via regex on your response text;
+anything after that line is dropped from the dispatch record.
+
+This contract closes bmad-cli#20 (cache-hit-rate measurement gap). The
+fields feed `bmad dispatch record --input-tokens / --output-tokens /
+--cache-read-tokens / --cache-create-tokens`, which in turn feeds
+`bmad sprint status`'s `cache_hit_rate = cache_read / (input + cache_read)`
+column.
