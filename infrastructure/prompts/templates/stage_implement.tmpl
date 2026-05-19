@@ -13,46 +13,17 @@
        .PriorAttempt            (*struct)  optional — populated on retries
        .EpicContext             (string)   optional — excerpt of epic file
        .IdempotencyKey          (string)   optional — agent MUST echo back in return JSON
+
+   Layout: cache-stable PREFIX first (atlas guide + protocol + JSON schema —
+   byte-identical across every dispatch of this stage), then variable per-story
+   data appended as a SUFFIX. This ordering lets Anthropic prompt-cache anchor
+   on the prefix and only re-encode the suffix per dispatch (issue #20).
 */}}
-# Implement Story {{.StoryID}}
+# Implement (stage: implement)
 
-Hydrated spec: `{{.HydratedFile}}`
-Mode: **{{.Mode}}**
-
-{{if .StoryContextBundlePath -}}
-## Per-story curated context
-
-`{{.StoryContextBundlePath}}` — pre-extracted lightweight epics entry +
-matching architecture sections for this story's FR refs. The hydrator
-already consumed this file; if you need quick reminders of the spec's
-"why" without re-reading the full hydrated file, skim here.
-{{- end}}
-
-{{if or .EnvConfig.PgPort .EnvConfig.RedisPort .EnvConfig.OtelPort -}}
-## Test environment (already up — do NOT recreate)
-
-{{if .EnvConfig.PgPort -}}
-- PostgreSQL on `:{{.EnvConfig.PgPort}}`  (db: `{{.EnvConfig.DbName}}`)
-{{end -}}
-{{if .EnvConfig.RedisPort -}}
-- Redis on `:{{.EnvConfig.RedisPort}}`
-{{end -}}
-{{if .EnvConfig.OtelPort -}}
-- OTEL on `:{{.EnvConfig.OtelPort}}`
-{{end -}}
-{{end}}
-
-{{if .PriorAttempt -}}
-## Prior attempt summary
-
-{{template "retry_context" .PriorAttempt}}
-{{- end}}
-
-{{if .EpicContext -}}
-## Epic context
-
-{{.EpicContext}}
-{{- end}}
+You are the **tdd-implementer** L3 agent. The per-story spec is appended at
+the end of this prompt under "## Story dispatch" — read that LAST, after the
+protocol below is in working memory.
 
 ## Codebase discovery — prefer atlas CLI over grep
 
@@ -80,22 +51,69 @@ full verb listing. The atlas state DB is at `.atlas/atlas.db`
 — use `atlas codebase find` to resolve a feature ID's primary symbol
 first.
 
-## What to do
+## Protocol — what to do (every implement dispatch follows this)
 
-1. Read the hydrated spec at `{{.HydratedFile}}`.
+1. Read the hydrated spec at the path appended in "## Story dispatch" below.
 2. Run TDD per the spec's checklist (red → green → refactor).
 3. Run `task check` (or repo-equivalent) before signaling completion.
-4. Emit JSON result. {{if .IdempotencyKey}}You MUST include `"idempotency_key"` as
-   shown below so the orchestrator can close out the right dispatch row.{{end}}
+4. Emit JSON result. When an idempotency key is appended in the dispatch
+   block, you MUST include `"idempotency_key"` in your return so the
+   orchestrator can close out the right dispatch row.
+
+## Return JSON shape (every implement dispatch returns this shape)
 
 ```json
 {
-  "story_id": "{{.StoryID}}",
+  "story_id": "<echo from dispatch>",
   "stage": "implement",
   "status": "ok|blocked|errored",
   "reason": "...",
   "files_changed": ["..."],
-  "tests_added": ["..."]{{if .IdempotencyKey}},
-  "idempotency_key": "{{.IdempotencyKey}}"{{end}}
+  "tests_added": ["..."],
+  "idempotency_key": "<echo from dispatch if provided>"
 }
 ```
+
+{{/* ──────── Cache boundary — content above is byte-stable across dispatches ──────── */ -}}
+
+## Story dispatch
+
+- Story ID: **{{.StoryID}}**
+- Hydrated spec: `{{.HydratedFile}}`
+- Mode: **{{.Mode}}**
+{{if .IdempotencyKey}}- Idempotency key: `{{.IdempotencyKey}}` (echo this in your return JSON)
+{{end}}
+{{if .StoryContextBundlePath -}}
+### Per-story curated context
+
+`{{.StoryContextBundlePath}}` — pre-extracted lightweight epics entry +
+matching architecture sections for this story's FR refs. The hydrator
+already consumed this file; if you need quick reminders of the spec's
+"why" without re-reading the full hydrated file, skim here.
+{{- end}}
+
+{{if or .EnvConfig.PgPort .EnvConfig.RedisPort .EnvConfig.OtelPort -}}
+### Test environment (already up — do NOT recreate)
+
+{{if .EnvConfig.PgPort -}}
+- PostgreSQL on `:{{.EnvConfig.PgPort}}`  (db: `{{.EnvConfig.DbName}}`)
+{{end -}}
+{{if .EnvConfig.RedisPort -}}
+- Redis on `:{{.EnvConfig.RedisPort}}`
+{{end -}}
+{{if .EnvConfig.OtelPort -}}
+- OTEL on `:{{.EnvConfig.OtelPort}}`
+{{end -}}
+{{end}}
+
+{{if .PriorAttempt -}}
+### Prior attempt summary
+
+{{template "retry_context" .PriorAttempt}}
+{{- end}}
+
+{{if .EpicContext -}}
+### Epic context
+
+{{.EpicContext}}
+{{- end}}

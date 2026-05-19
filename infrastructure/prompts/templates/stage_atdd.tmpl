@@ -6,17 +6,56 @@
                                     when no port is set (issue #17)
        .PriorAttempt    (*struct)  optional
        .IdempotencyKey  (string)   optional
+
+   Layout: stable PREFIX (protocol + return JSON) first, story-specific
+   SUFFIX last. Lets prompt cache anchor on the prefix (issue #20).
 */}}
-# Write Acceptance Tests for Story {{.StoryID}}
+# Write Acceptance Tests (stage: atdd)
 
 You are the **atdd-writer** L3 agent (STRICT mode). Per your agent
-definition, generate failing acceptance tests for this story BEFORE
+definition, generate failing acceptance tests for a story BEFORE
 implementation. Red-phase TDD.
 
-Hydrated spec: `{{.HydratedFile}}`
+The per-story details are appended at the end of this prompt under
+"## Story dispatch" — read that LAST.
 
+## Protocol — what to do (every atdd dispatch follows this)
+
+Read the hydrated spec referenced in the dispatch block. Translate each
+`Given/When/Then` acceptance criterion into a failing test. Tests must:
+- Compile cleanly
+- Fail for the right reason (assert against unimplemented behavior)
+- Be runnable via `go test ./...` (or repo-equivalent)
+
+If the story's ACs are purely doc/verification (e.g., "the choice is
+documented in X"), surface that and emit `status: blocked` with a clear
+reason — the orchestrator will route accordingly. STRICT mode forces
+this stage; the agent decides if it applies.
+
+## Return JSON shape (every atdd dispatch returns this shape)
+
+```json
+{
+  "story_id": "<echo from dispatch>",
+  "stage": "atdd",
+  "status": "ok|blocked|errored",
+  "reason": "...",
+  "tests_added": ["path/to/foo_test.go", "..."],
+  "idempotency_key": "<echo from dispatch if provided>"
+}
+```
+
+{{/* ──────── Cache boundary — content above is byte-stable across dispatches ──────── */ -}}
+
+## Story dispatch
+
+- Story ID: **{{.StoryID}}**
+- Hydrated spec: `{{.HydratedFile}}`
+- Mode: **{{.Mode}}**
+{{if .IdempotencyKey}}- Idempotency key: `{{.IdempotencyKey}}` (echo this in your return JSON)
+{{end}}
 {{if or .EnvConfig.PgPort .EnvConfig.RedisPort .EnvConfig.OtelPort -}}
-## Test environment (already up)
+### Test environment (already up)
 
 {{if .EnvConfig.PgPort -}}
 - Postgres :{{.EnvConfig.PgPort}} (db: `{{.EnvConfig.DbName}}`)
@@ -30,33 +69,7 @@ Hydrated spec: `{{.HydratedFile}}`
 {{end}}
 
 {{if .PriorAttempt -}}
-## Prior attempt summary
+### Prior attempt summary
 
 {{template "retry_context" .PriorAttempt}}
 {{- end}}
-
-## What to do
-
-Read the hydrated spec. Translate each `Given/When/Then` acceptance
-criterion into a failing test. Tests must:
-- Compile cleanly
-- Fail for the right reason (assert against unimplemented behavior)
-- Be runnable via `go test ./...` (or repo-equivalent)
-
-If the story's ACs are purely doc/verification (e.g., "the choice is
-documented in X"), surface that and emit `status: blocked` with a clear
-reason — the orchestrator will route accordingly. STRICT mode forces
-this stage; the agent decides if it applies.
-
-## Return JSON
-
-```json
-{
-  "story_id": "{{.StoryID}}",
-  "stage": "atdd",
-  "status": "ok|blocked|errored",
-  "reason": "...",
-  "tests_added": ["path/to/foo_test.go", "..."]{{if .IdempotencyKey}},
-  "idempotency_key": "{{.IdempotencyKey}}"{{end}}
-}
-```
