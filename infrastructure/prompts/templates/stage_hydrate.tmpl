@@ -16,59 +16,22 @@
                                            bundle isn't enough.
        .PriorAttempt            (*struct)  optional
        .IdempotencyKey          (string)   optional
+
+   Layout: stable PREFIX (atlas guide + protocol + return JSON) first,
+   per-story SUFFIX last. The bundle-path conditionals live in the suffix
+   because they reference per-story bundle paths. Lets prompt cache
+   anchor on the prefix (issue #20).
 */}}
-# Hydrate Story {{.StoryID}}
+# Hydrate (stage: hydrate)
 
-You are the **story-hydrator** L3 agent. Take this lightweight story from
-`epics.md` and produce the full per-story implementation file at
-`{{.HydratedFile}}` per your agent definition's protocol.
+You are the **story-hydrator** L3 agent. Take a lightweight story from
+`epics.md` and produce the full per-story implementation file at the
+hydrated path appended in the dispatch block — per your agent
+definition's protocol.
 
-Mode: **{{.Mode}}**
-
-{{if .StoryContextBundlePath -}}
-## Per-story curated context (read this FIRST — pre-extracted)
-
-`{{.StoryContextBundlePath}}` is a deterministic extract just for this
-story: the lightweight epics.md entry + the architecture sections
-matching every `FR-*` reference in that entry. Reading this one file
-covers ~95% of what the hydrator needs — saves the agent from grepping
-architecture.md / audit / saga-mapping at runtime.
-
-**Read this file as your PRIMARY context.** Only fall back to the
-sources below if a section you need is missing from the bundle (the
-bundle's warnings list flags any FR ref the extractor couldn't match).
-
-{{else if .CacheBundlePath -}}
-## Standing corpus (read this ONCE — pre-bundled)
-
-`{{.CacheBundlePath}}` contains the architecture canon + BC audit (+
-supplement) + EDA cutover decision tree + saga-to-slice mapping
-concatenated with anchor headings. Read it FIRST and rely on the
-contents for cross-cutting context — do NOT re-read the individual
-source files unless you need a section the bundle missed.
-
-## Per-story inputs (always read fresh)
-
-- Lightweight story: in `{{.EpicsPath}}` under `### Story {{.StoryID}}:`
-
-{{- else -}}
-## Source inputs (fallback — no bundle configured)
-
-- Lightweight story: in `{{.EpicsPath}}` under `### Story {{.StoryID}}:`
-- Architecture canon: `{{.ArchitecturePath}}`
-- Companion artifacts (BC audit, saga mapping, Pattern Applicability Matrix):
-  in the same `docs/architecture/eda-cutover/` directory
-
-Tip: run `bmad story context-bundle {{.StoryID}}` for a per-story
-curated bundle (highest leverage), or `bmad sprint cache-bundle`
-for a sprint-wide standing corpus.
-{{- end}}
-
-{{if .PriorAttempt -}}
-## Prior attempt summary
-
-{{template "retry_context" .PriorAttempt}}
-{{- end}}
+The per-story details (story id, epics path, hydrated output path, mode,
+bundle paths) are appended at the end of this prompt under "## Story
+dispatch" — read that LAST.
 
 ## Codebase discovery — prefer atlas CLI over grep
 
@@ -96,23 +59,85 @@ full verb listing. The atlas state DB is at `.atlas/atlas.db`
 — use `atlas codebase find` to resolve a feature ID's primary symbol
 first.
 
-## What to do
+## Protocol — what to do (every hydrate dispatch follows this)
 
 Follow your agent definition's hydration protocol. Write the hydrated
-file to `{{.HydratedFile}}` and DO NOT modify any other file.
+file to the path shown in the dispatch block and DO NOT modify any
+other file.
 
-## Return JSON
+If the dispatch block lists a per-story context bundle, **read that file
+FIRST as your primary context** — it's a deterministic extract of the
+lightweight epics entry plus the architecture sections matching every
+`FR-*` ref in the entry, covering ~95% of what the hydrator needs.
+Only fall back to the source files (epics, architecture canon, BC
+audit) if a section you need is missing from the bundle (the bundle's
+warnings list flags any unresolved FR ref).
+
+If no per-story bundle but a sprint-wide cache bundle is provided,
+read it ONCE and rely on it for cross-cutting context — do NOT re-read
+the individual source files unless a section is missing.
+
+If neither bundle is provided, fall back to reading the raw sources
+referenced in the dispatch block.
+
+## Return JSON shape (every hydrate dispatch returns this shape)
 
 ```json
 {
-  "story_id": "{{.StoryID}}",
+  "story_id": "<echo from dispatch>",
   "stage": "hydrate",
   "status": "ok|blocked|errored",
   "reason": "...",
-  "hydrated_file_path": "{{.HydratedFile}}",
+  "hydrated_file_path": "<echo from dispatch>",
   "slice": "...",
   "bc_target": "...",
-  "fr_refs": ["..."]{{if .IdempotencyKey}},
-  "idempotency_key": "{{.IdempotencyKey}}"{{end}}
+  "fr_refs": ["..."],
+  "idempotency_key": "<echo from dispatch if provided>"
 }
 ```
+
+{{/* ──────── Cache boundary — content above is byte-stable across dispatches ──────── */ -}}
+
+## Story dispatch
+
+- Story ID: **{{.StoryID}}**
+- Mode: **{{.Mode}}**
+- Hydrated output path: `{{.HydratedFile}}`
+- Lightweight story: in `{{.EpicsPath}}` under `### Story {{.StoryID}}:`
+- Architecture canon: `{{.ArchitecturePath}}`
+{{if .IdempotencyKey}}- Idempotency key: `{{.IdempotencyKey}}` (echo this in your return JSON)
+{{end}}
+{{if .StoryContextBundlePath -}}
+### Per-story curated context (PRIMARY — read FIRST)
+
+`{{.StoryContextBundlePath}}` — pre-extracted, just for this story.
+Covers ~95% of what hydration needs. The bundle's warnings list flags
+any FR ref the extractor couldn't match.
+{{- end}}
+
+{{if and (not .StoryContextBundlePath) .CacheBundlePath -}}
+### Standing corpus (read ONCE — pre-bundled)
+
+`{{.CacheBundlePath}}` — architecture canon + BC audit + EDA cutover
+decision tree + saga-to-slice mapping, concatenated with anchor
+headings. Rely on its contents for cross-cutting context; do NOT
+re-read the individual source files unless a section is missing.
+{{- end}}
+
+{{if and (not .StoryContextBundlePath) (not .CacheBundlePath) -}}
+### Source inputs (fallback — no bundle configured)
+
+- Companion artifacts (BC audit, saga mapping, Pattern Applicability
+  Matrix): in the same `docs/architecture/eda-cutover/` directory as
+  the architecture canon listed above.
+
+Tip: run `bmad story context-bundle {{.StoryID}}` for a per-story
+curated bundle (highest leverage), or `bmad sprint cache-bundle` for a
+sprint-wide standing corpus.
+{{- end}}
+
+{{if .PriorAttempt -}}
+### Prior attempt summary
+
+{{template "retry_context" .PriorAttempt}}
+{{- end}}

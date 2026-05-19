@@ -5,19 +5,56 @@
        .Branch          (string)   required — git branch the worktree is on
        .PriorAttempt    (*struct)  optional
        .IdempotencyKey  (string)   optional
-*/}}
-# Commit Story {{.StoryID}}
 
-Commit + push the work for this story. Use the `smart-commit` skill
+   Layout: stable PREFIX (protocol + return JSON) first, story-specific
+   SUFFIX (branch + paths + retries) last. Lets prompt cache anchor on
+   the prefix (issue #20).
+*/}}
+# Commit (stage: commit)
+
+Commit + push the work for a story. Use the `smart-commit` skill
 (installed at ~/.claude/skills/smart-commit/) to categorize the diff,
 choose modular-vs-single commit, and produce a conventional message.
 
-Branch: `{{.Branch}}`
-Hydrated spec: `{{.HydratedFile}}`
-Mode: **{{.Mode}}**
+The per-story details (branch, hydrated spec, mode) are appended at the
+end of this prompt under "## Story dispatch" — read that LAST.
 
+## Protocol — what to do (every commit dispatch follows this)
+
+1. Invoke the smart-commit skill against the staged + unstaged diff
+   in the worktree on the branch shown in the dispatch block.
+2. After commit lands, run `task check` (or repo-equivalent) to
+   verify CI green.
+3. If CI fails → `status: blocked` with the failing target's output.
+4. If CI passes → push the branch; ready for PR.
+
+## Return JSON shape (every commit dispatch returns this shape)
+
+```json
+{
+  "story_id": "<echo from dispatch>",
+  "stage": "commit",
+  "status": "ok|blocked|errored",
+  "reason": "...",
+  "commit_hash": "...",
+  "branch": "<echo from dispatch>",
+  "ci_passed": true,
+  "idempotency_key": "<echo from dispatch if provided>"
+}
+```
+
+{{/* ──────── Cache boundary — content above is byte-stable across dispatches ──────── */ -}}
+
+## Story dispatch
+
+- Story ID: **{{.StoryID}}**
+- Branch: `{{.Branch}}`
+- Hydrated spec: `{{.HydratedFile}}`
+- Mode: **{{.Mode}}**
+{{if .IdempotencyKey}}- Idempotency key: `{{.IdempotencyKey}}` (echo this in your return JSON)
+{{end}}
 {{if .PriorAttempt -}}
-## Prior attempt summary
+### Prior attempt summary
 
 {{template "retry_context" .PriorAttempt}}
 
@@ -25,27 +62,3 @@ The prior commit attempt failed CI (`task check`). The blocker(s) live
 in the previous attempt's `reason`. Fix them with a follow-up commit
 (re-run TDD as needed), then re-attempt this commit stage.
 {{- end}}
-
-## What to do
-
-1. Invoke the smart-commit skill against the staged + unstaged diff
-   in the worktree on branch `{{.Branch}}`.
-2. After commit lands, run `task check` (or repo-equivalent) to
-   verify CI green.
-3. If CI fails → `status: blocked` with the failing target's output.
-4. If CI passes → push the branch; ready for PR.
-
-## Return JSON
-
-```json
-{
-  "story_id": "{{.StoryID}}",
-  "stage": "commit",
-  "status": "ok|blocked|errored",
-  "reason": "...",
-  "commit_hash": "...",
-  "branch": "{{.Branch}}",
-  "ci_passed": true{{if .IdempotencyKey}},
-  "idempotency_key": "{{.IdempotencyKey}}"{{end}}
-}
-```

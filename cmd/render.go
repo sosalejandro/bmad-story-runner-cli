@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -23,13 +24,14 @@ import (
 //   3. config defaults (lowest — mode, max_parallel, reserve_ram_mb)
 func newRenderCmd() *cobra.Command {
 	var (
-		dataJSON  string
-		storyID   string
-		envStory  string
-		stageFlag string
-		attempt   int
-		mode      string
-		outPath   string
+		dataJSON          string
+		storyID           string
+		envStory          string
+		stageFlag         string
+		attempt           int
+		mode              string
+		outPath           string
+		debugCachePrefix  bool
 	)
 	cmd := &cobra.Command{
 		Use:   "render <template-name>",
@@ -98,6 +100,10 @@ func newRenderCmd() *cobra.Command {
 				return err
 			}
 
+			if debugCachePrefix {
+				out = annotateCacheBoundary(out)
+			}
+
 			if outPath != "" {
 				if err := os.WriteFile(outPath, []byte(out), 0o644); err != nil {
 					return fmt.Errorf("write --out %s: %w", outPath, err)
@@ -115,9 +121,48 @@ func newRenderCmd() *cobra.Command {
 	cmd.Flags().IntVar(&attempt, "attempt", 1, "attempt number (used by retry_context)")
 	cmd.Flags().StringVar(&mode, "mode", "", "mode override (defaults to config.mode)")
 	cmd.Flags().StringVar(&outPath, "out", "", "write to file instead of stdout")
+	cmd.Flags().BoolVar(&debugCachePrefix, "debug-cache-prefix", false, "annotate the cache-boundary in the rendered output (issue #20). The stable PREFIX (cache-eligible — byte-identical across dispatches of this stage) is wrapped with `=== STABLE PREFIX ===` markers; the variable SUFFIX (per-story slot data — cache-busts each dispatch) is wrapped with `=== VARIABLE SUFFIX ===` markers. Used for diagnosing prompt-cache hit-rate issues.")
 	cmd.Flags().String("idempotency-key", "", "idempotency key from `dispatch begin` — injected into the rendered prompt so the L3 agent echoes it back")
 	addV6PersistentFlags(cmd)
 	return cmd
+}
+
+// cacheBoundaryMarker matches the literal HEADING line every stage_*.tmpl
+// uses to open its per-story suffix. The marker doubles as the cache
+// boundary: every byte before the marker is stable across dispatches of the
+// same stage; every byte from the marker onward is per-story.
+//
+// The marker is anchored with a leading newline so prose mentions of the
+// section name (e.g. `read "## Story dispatch" last`) inside the stable
+// prefix don't get matched.
+//
+// For non-stage templates (orchestrator_loop, retry_context), there is no
+// boundary — the entire template is either cache-stable (orchestrator_loop
+// is per-session-stable) or always nested inside another template
+// (retry_context). We surface the whole text as "stable" in that case.
+const cacheBoundaryMarker = "\n## Story dispatch\n"
+
+// annotateCacheBoundary wraps the rendered output with explicit STABLE PREFIX
+// / VARIABLE SUFFIX markers so operators can see exactly where the prompt
+// stops being cache-eligible.
+func annotateCacheBoundary(rendered string) string {
+	idx := strings.Index(rendered, cacheBoundaryMarker)
+	if idx < 0 {
+		// No marker means the template isn't a per-story stage — treat the
+		// whole thing as the stable prefix.
+		return "=== STABLE PREFIX (cache-eligible — no per-story variance) ===\n" +
+			rendered +
+			"\n=== END (no variable suffix) ===\n"
+	}
+	// Include the leading newline in the prefix so the suffix starts at the
+	// "## Story dispatch" heading itself.
+	prefix := rendered[:idx+1]
+	suffix := rendered[idx+1:]
+	return "=== STABLE PREFIX (cache-eligible — byte-identical across dispatches of this stage) ===\n" +
+		prefix +
+		"=== VARIABLE SUFFIX (per-story — cache-busts here onward) ===\n" +
+		suffix +
+		"=== END ===\n"
 }
 
 func needsConfigDefaults(template string) bool {

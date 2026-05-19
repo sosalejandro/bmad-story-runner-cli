@@ -6,18 +6,54 @@
                                     when no port is set (issue #17)
        .PriorAttempt    (*struct)  optional
        .IdempotencyKey  (string)   optional
+
+   Layout: stable PREFIX (protocol + return JSON) first, story-specific
+   SUFFIX last. Lets prompt cache anchor on the prefix (issue #20).
 */}}
-# Expand Test Coverage for Story {{.StoryID}}
+# Expand Test Coverage (stage: automate)
 
 You are the **test-automate** L3 agent (STRICT mode). The
-implementation has landed; ATDD covered acceptance-level. Your job
-per your agent definition: expand to unit + integration + contract
-coverage that ATDD's high-level focus missed.
+implementation has landed; ATDD covered acceptance-level. Your job per
+your agent definition: expand to unit + integration + contract coverage
+that ATDD's high-level focus missed.
 
-Hydrated spec: `{{.HydratedFile}}`
+The per-story details are appended at the end of this prompt under
+"## Story dispatch" — read that LAST.
 
+## Protocol — what to do (every automate dispatch follows this)
+
+Discover coverage gaps in the just-implemented work. Add tests at the
+level the original ATDD didn't cover (typically unit tests for branching
+logic, integration tests for adapter contracts). Tests must pass.
+
+If the implementation is purely doc/config (no code paths to cover),
+surface that and emit `status: blocked` with reason — the orchestrator
+will route accordingly.
+
+## Return JSON shape (every automate dispatch returns this shape)
+
+```json
+{
+  "story_id": "<echo from dispatch>",
+  "stage": "automate",
+  "status": "ok|blocked|errored",
+  "reason": "...",
+  "tests_added": ["..."],
+  "idempotency_key": "<echo from dispatch if provided>"
+}
+```
+
+{{/* ──────── Cache boundary — content above is byte-stable across dispatches ──────── */ -}}
+
+## Story dispatch
+
+- Story ID: **{{.StoryID}}**
+- Hydrated spec: `{{.HydratedFile}}`
+- Mode: **{{.Mode}}**
+{{if .IdempotencyKey}}- Idempotency key: `{{.IdempotencyKey}}` (echo this in your return JSON)
+{{end}}
 {{if or .EnvConfig.PgPort .EnvConfig.RedisPort .EnvConfig.OtelPort -}}
-## Test environment (already up)
+### Test environment (already up)
 
 {{if .EnvConfig.PgPort -}}
 - Postgres :{{.EnvConfig.PgPort}} (db: `{{.EnvConfig.DbName}}`)
@@ -31,30 +67,7 @@ Hydrated spec: `{{.HydratedFile}}`
 {{end}}
 
 {{if .PriorAttempt -}}
-## Prior attempt summary
+### Prior attempt summary
 
 {{template "retry_context" .PriorAttempt}}
 {{- end}}
-
-## What to do
-
-Discover coverage gaps in the just-implemented work. Add tests at the
-level the original ATDD didn't cover (typically unit tests for branching
-logic, integration tests for adapter contracts). Tests must pass.
-
-If the implementation is purely doc/config (no code paths to cover),
-surface that and emit `status: blocked` with reason — the orchestrator
-will route accordingly.
-
-## Return JSON
-
-```json
-{
-  "story_id": "{{.StoryID}}",
-  "stage": "automate",
-  "status": "ok|blocked|errored",
-  "reason": "...",
-  "tests_added": ["..."]{{if .IdempotencyKey}},
-  "idempotency_key": "{{.IdempotencyKey}}"{{end}}
-}
-```
