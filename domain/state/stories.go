@@ -44,6 +44,14 @@ type Stories interface {
 type StoryDependencies interface {
 	Add(ctx context.Context, storyID, dependsOnID string) error
 	Remove(ctx context.Context, storyID, dependsOnID string) error
+	// RemoveAllFor deletes every dependency edge for storyID. Used by
+	// `bmad sprint plan` to make re-ingest idempotent: when an operator
+	// relaxes `depends_on` for a story (e.g. ["1.4"] → []), the planner
+	// must drop the stale row(s) before re-inserting whatever the new
+	// frontmatter declares. Without this, `bmad story next` continues to
+	// see the old (unsatisfied) edge and skips the story forever.
+	// No-op (not an error) if the story has no dependency rows.
+	RemoveAllFor(ctx context.Context, storyID string) error
 	Of(ctx context.Context, storyID string) ([]string, error)
 	DependentsOf(ctx context.Context, storyID string) ([]string, error)
 }
@@ -53,6 +61,14 @@ type StoryDependencies interface {
 type StoryAffects interface {
 	Add(ctx context.Context, storyID, path string) error
 	Remove(ctx context.Context, storyID, path string) error
+	// RemoveAllFor deletes every affects row for storyID. Used by
+	// `bmad sprint plan` to make re-ingest idempotent: when an operator
+	// removes a path from a story's `affects` list, the planner must
+	// drop the stale row(s) before re-inserting the new set — otherwise
+	// file-overlap detection in `bmad story next` keeps splitting batches
+	// for a path that's no longer claimed. No-op (not an error) if the
+	// story has no affects rows.
+	RemoveAllFor(ctx context.Context, storyID string) error
 	Of(ctx context.Context, storyID string) ([]string, error)
 	StoriesAffecting(ctx context.Context, path string) ([]string, error)
 }

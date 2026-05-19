@@ -28,7 +28,16 @@ type IngestResult struct {
 	StoriesInserted    int     `json:"stories_inserted"`
 	StoriesUpdated     int     `json:"stories_updated"`
 	DependenciesAdded  int     `json:"dependencies_added"`
+	// DependenciesCleared counts story_dependencies rows wiped by the
+	// idempotent re-ingest step (one count per story whose old edges were
+	// dropped before its current frontmatter was re-applied). Surfaces
+	// "11 stories had their deps relaxed and reset on this replan" so an
+	// operator can see what changed.
+	DependenciesCleared int     `json:"dependencies_cleared,omitempty"`
 	AffectsAdded       int     `json:"affects_added"`
+	// AffectsCleared counts story_affects rows wiped during idempotent
+	// re-ingest (analogous to DependenciesCleared).
+	AffectsCleared     int     `json:"affects_cleared,omitempty"`
 	BatchesCreated     int     `json:"batches_created"`
 	BatchIDs           []int64 `json:"batch_ids"`
 	// Scope, when non-empty, is the epic-id filter that was applied. Stories
@@ -82,8 +91,16 @@ func FilterByScope(parsed []ParsedStory, epicID string) []ParsedStory {
 }
 
 // Plan persists parsed stories + builds batches. Clears any existing planned
-// batches first (re-planning replaces the queue). Idempotent on stories +
-// dependencies + affects (INSERT OR IGNORE under the hood).
+// batches first (re-planning replaces the queue).
+//
+// Idempotency contract (issue #21 gap 1): for every story in the parsed
+// slice, the planner FIRST wipes its existing story_dependencies and
+// story_affects rows, then re-inserts whatever the current frontmatter
+// declares. This is what makes "operator relaxed depends_on: ["1.4"] → []
+// and re-ran sprint plan" actually free the story for dispatch — without
+// the wipe, the stale edge persists in SQLite and `bmad story next` keeps
+// seeing the unmet prerequisite. Stories ABSENT from `parsed` are left
+// alone (a scoped replan never touches out-of-scope rows).
 func (p *Planner) Plan(ctx context.Context, parsed []ParsedStory, maxParallel int) (*IngestResult, error) {
 	if maxParallel <= 0 {
 		maxParallel = 4
@@ -111,6 +128,30 @@ func (p *Planner) Plan(ctx context.Context, parsed []ParsedStory, maxParallel in
 			res.StoriesUpdated++
 		} else {
 			res.StoriesInserted++
+		}
+
+		// Idempotent re-ingest: wipe stale edges before re-inserting the
+		// frontmatter's current set. Counted only when the story has
+		// existing rows, so a fresh insert doesn't inflate Cleared counts.
+		existingDeps, err := p.Dependencies.Of(ctx, st.ID)
+		if err != nil {
+			return nil, fmt.Errorf("planner deps inspect %q: %w", st.ID, err)
+		}
+		if len(existingDeps) > 0 {
+			if err := p.Dependencies.RemoveAllFor(ctx, st.ID); err != nil {
+				return nil, fmt.Errorf("planner deps clear %q: %w", st.ID, err)
+			}
+			res.DependenciesCleared++
+		}
+		existingAffects, err := p.Affects.Of(ctx, st.ID)
+		if err != nil {
+			return nil, fmt.Errorf("planner affects inspect %q: %w", st.ID, err)
+		}
+		if len(existingAffects) > 0 {
+			if err := p.Affects.RemoveAllFor(ctx, st.ID); err != nil {
+				return nil, fmt.Errorf("planner affects clear %q: %w", st.ID, err)
+			}
+			res.AffectsCleared++
 		}
 
 		for _, dep := range ps.Frontmatter.DependsOn {

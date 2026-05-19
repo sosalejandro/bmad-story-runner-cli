@@ -34,6 +34,18 @@ func (s *StoryDependenciesStore) Remove(ctx context.Context, storyID, dependsOnI
 	return nil
 }
 
+// RemoveAllFor wipes every dependency row for storyID. See port docstring —
+// used by the planner for idempotent re-ingest.
+func (s *StoryDependenciesStore) RemoveAllFor(ctx context.Context, storyID string) error {
+	_, err := s.db.sqlDB().ExecContext(ctx,
+		`DELETE FROM story_dependencies WHERE story_id = ?`,
+		storyID)
+	if err != nil {
+		return fmt.Errorf("story_dependencies remove-all-for %q: %w", storyID, err)
+	}
+	return nil
+}
+
 func (s *StoryDependenciesStore) Of(ctx context.Context, storyID string) ([]string, error) {
 	return queryIDs(ctx, s.db,
 		`SELECT depends_on_id FROM story_dependencies WHERE story_id = ? ORDER BY depends_on_id`,
@@ -67,6 +79,18 @@ func (s *StoryAffectsStore) Remove(ctx context.Context, storyID, path string) er
 		storyID, path)
 	if err != nil {
 		return fmt.Errorf("story_affects remove: %w", err)
+	}
+	return nil
+}
+
+// RemoveAllFor wipes every affects row for storyID. See port docstring —
+// used by the planner for idempotent re-ingest.
+func (s *StoryAffectsStore) RemoveAllFor(ctx context.Context, storyID string) error {
+	_, err := s.db.sqlDB().ExecContext(ctx,
+		`DELETE FROM story_affects WHERE story_id = ?`,
+		storyID)
+	if err != nil {
+		return fmt.Errorf("story_affects remove-all-for %q: %w", storyID, err)
 	}
 	return nil
 }
