@@ -1,0 +1,19 @@
+{
+  "release-type": "go",
+  "packages": {
+    ".": {
+      "package-name": "bmad-story-runner-cli",
+      "release-type": "go",
+      "include-component-in-tag": false,
+      "extra-files": ["cmd/bmad/main.go"],
+      "changelog-sections": [
+        { "type": "feat", "section": "Features" },
+        { "type": "fix", "section": "Bug Fixes" },
+        { "type": "perf", "section": "Performance" },
+        { "type": "refactor", "section": "Code Refactoring" },
+        { "type": "docs", "section": "Documentation", "hidden": false },
+        { "type": "chore", "section": "Chores", "hidden": true }
+      ]
+    }
+  }
+}
