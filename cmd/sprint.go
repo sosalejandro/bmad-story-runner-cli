@@ -141,6 +141,16 @@ Safety rails (issue #14):
 				res.Scope = scope
 				res.StoriesSkippedByScope = totalBeforeScope - len(parsed)
 			}
+			if jsonOutput {
+				args := map[string]any{}
+				if scope != "" {
+					args["scope"] = scope
+				}
+				if maxP > 0 {
+					args["max_parallel"] = maxP
+				}
+				return emitJSONStdout(commandPathSansRoot(c), args, res, nil)
+			}
 			return json.NewEncoder(os.Stdout).Encode(res)
 		},
 	}
@@ -223,6 +233,10 @@ func newSprintPauseCmd() *cobra.Command {
 			if err := cfg.Set(ctx, sprintPausedKey, "true"); err != nil {
 				return err
 			}
+			if jsonOutput {
+				return emitJSONStdout(commandPathSansRoot(c), nil,
+					map[string]any{"ok": true, "paused": true}, nil)
+			}
 			fmt.Println("sprint paused (next iteration will exit gracefully)")
 			return nil
 		},
@@ -245,6 +259,10 @@ func newSprintResumeCmd() *cobra.Command {
 			cfg := sqlite.NewConfigStore(db)
 			if err := cfg.Delete(ctx, sprintPausedKey); err != nil {
 				return err
+			}
+			if jsonOutput {
+				return emitJSONStdout(commandPathSansRoot(c), nil,
+					map[string]any{"ok": true, "paused": false}, nil)
 			}
 			fmt.Println("sprint resumed")
 			return nil
@@ -313,6 +331,9 @@ func newSprintStatusCmd() *cobra.Command {
 				"batches":          batchSummary,
 				"unresolved_checkpoint": unresolved,
 				"tokens":           tokenBreakdown,
+			}
+			if jsonOutput {
+				return emitJSONStdout(commandPathSansRoot(c), nil, report, nil)
 			}
 			if raw {
 				return json.NewEncoder(os.Stdout).Encode(report)

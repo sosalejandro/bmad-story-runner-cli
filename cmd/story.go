@@ -89,6 +89,9 @@ func newStoryStatusCmd() *cobra.Command {
 			defer cleanup()
 
 			if len(args) == 1 {
+				if jsonOutput {
+					return emitStoryDetailJSON(ctx, svc, c, args[0])
+				}
 				return printStoryDetail(ctx, svc, args[0])
 			}
 
@@ -103,6 +106,9 @@ func newStoryStatusCmd() *cobra.Command {
 			}
 			if hasEnvSet {
 				f.HasEnv = &hasEnv
+			}
+			if jsonOutput {
+				return emitStoryListJSON(ctx, svc, c, f, statusFlag, stageFlag, hasEnvSet, hasEnv)
 			}
 			return printStoryTable(ctx, svc, f)
 		},
@@ -208,12 +214,17 @@ agent returns produces the same instruction.`,
 			if err := svc.Stories.SetCurrentStage(ctx, id, &stage); err != nil {
 				return err
 			}
-			return json.NewEncoder(os.Stdout).Encode(map[string]string{
+			result := map[string]string{
 				"action":   "dispatch",
 				"agent":    "story-hydrator",
 				"story_id": id,
 				"stage":    string(stage),
-			})
+			}
+			if jsonOutput {
+				return emitJSONStdout(commandPathSansRoot(c),
+					map[string]any{"story_id": id}, result, nil)
+			}
+			return json.NewEncoder(os.Stdout).Encode(result)
 		},
 	}
 }
@@ -298,13 +309,27 @@ to disable the reaper.`,
 				actions = kept
 			}
 
-			return json.NewEncoder(os.Stdout).Encode(map[string]any{
-				"max":             max,
-				"claimed":         claim,
-				"actions":         actions,
-				"reaped_claims":   reaped,
+			result := map[string]any{
+				"max":               max,
+				"claimed":           claim,
+				"actions":           actions,
+				"reaped_claims":     reaped,
 				"claim_ttl_seconds": ttl,
-			})
+			}
+			if jsonOutput {
+				args := map[string]any{
+					"max_parallel": max,
+					"claim":        claim,
+					"claimer":      claimer,
+				}
+				warnings := make([]string, 0, len(reaped))
+				for _, id := range reaped {
+					warnings = append(warnings,
+						fmt.Sprintf("reaped stale claim on %s (age > %ds; assuming orchestrator crash)", id, ttl))
+				}
+				return emitJSONStdout(commandPathSansRoot(c), args, result, warnings)
+			}
+			return json.NewEncoder(os.Stdout).Encode(result)
 		},
 	}
 	cmd.Flags().IntVar(&max, "max-parallel", 0, "override max parallel slots (else uses config)")
@@ -376,8 +401,26 @@ func newStorySetStatusCmd() *cobra.Command {
 			defer cleanup()
 
 			id, status := args[0], state.Status(args[1])
+			// Look up the prior status so the JSON envelope can include
+			// it as old_status. We tolerate not-found here (returns "") —
+			// SetStatus will surface the real error if the story really
+			// doesn't exist.
+			var oldStatus string
+			if pre, err := svc.Stories.Get(ctx, id); err == nil {
+				oldStatus = string(pre.Status)
+			}
 			if err := svc.Stories.SetStatus(ctx, id, status); err != nil {
 				return fmt.Errorf("set-status %q: %w", id, err)
+			}
+			if jsonOutput {
+				return emitJSONStdout(commandPathSansRoot(c),
+					map[string]any{"story_id": id, "new_status": string(status)},
+					map[string]any{
+						"ok":         true,
+						"story_id":   id,
+						"old_status": oldStatus,
+						"new_status": string(status),
+					}, nil)
 			}
 			fmt.Printf("%s -> %s\n", id, status)
 			return nil
@@ -432,10 +475,22 @@ no-op; a warning is emitted to stderr and the command returns ok.`,
 				return fmt.Errorf("--commit / --commit-hash / --pr-url are only meaningful for a single story id")
 			}
 
+			completed := make([]string, 0, len(args))
 			for _, id := range args {
 				if err := runCompleteOne(ctx, svc, id, commitHash, prURL, autoCommit, noCommit, repoDir); err != nil {
 					return err
 				}
+				completed = append(completed, id)
+			}
+			if jsonOutput {
+				return emitJSONStdout(commandPathSansRoot(c),
+					map[string]any{"story_ids": args},
+					map[string]any{
+						"ok":          true,
+						"completed":   completed,
+						"commit_hash": commitHash,
+						"pr":          prURL,
+					}, nil)
 			}
 			return nil
 		},
@@ -479,7 +534,9 @@ func runCompleteOne(
 	if err := svc.Stories.ReleaseClaim(ctx, id); err != nil {
 		return fmt.Errorf("release claim %q: %w", id, err)
 	}
-	fmt.Printf("%s -> complete\n", id)
+	if !jsonOutput {
+		fmt.Printf("%s -> complete\n", id)
+	}
 
 	if !autoCommit || noCommit {
 		return nil
@@ -533,10 +590,12 @@ func runCompleteOne(
 	if err != nil {
 		return fmt.Errorf("complete --commit %q: %w", id, err)
 	}
-	if sha != "" {
-		fmt.Printf("%s -> committed %s\n", id, sha)
-	} else {
-		fmt.Printf("%s -> committed\n", id)
+	if !jsonOutput {
+		if sha != "" {
+			fmt.Printf("%s -> committed %s\n", id, sha)
+		} else {
+			fmt.Printf("%s -> committed\n", id)
+		}
 	}
 	return nil
 }
@@ -607,13 +666,19 @@ discovering "this stage is N/A for this story" at runtime.`,
 				skippedStrs = append(skippedStrs, string(s))
 			}
 
-			return json.NewEncoder(os.Stdout).Encode(map[string]any{
+			result := map[string]any{
 				"story_id":   st.ID,
 				"story_type": string(st.StoryType),
 				"mode":       string(effectiveMode),
 				"applicable": applicableStrs,
 				"skipped":    skippedStrs,
-			})
+			}
+			if jsonOutput {
+				return emitJSONStdout(commandPathSansRoot(c),
+					map[string]any{"story_id": st.ID, "mode": string(effectiveMode)},
+					result, nil)
+			}
+			return json.NewEncoder(os.Stdout).Encode(result)
 		},
 	}
 	cmd.Flags().StringVar(&mode, "mode", "", "override mode (default: from config.mode)")

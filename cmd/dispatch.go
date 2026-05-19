@@ -277,6 +277,27 @@ stage=hydrate AND status=ok.`,
 						fmt.Fprintf(os.Stderr, "WARN: %v\n", err)
 					}
 				}
+				if jsonOutput {
+					result := map[string]any{
+						"idempotency_key":     idemKey,
+						"status":              string(status),
+						"input_tokens":        inputTokens,
+						"output_tokens":       outputTokens,
+						"cache_read_tokens":   cacheRead,
+						"cache_create_tokens": cacheCreate,
+						"duration_ms":         durationMS,
+					}
+					if recordedOK {
+						result["story_id"] = recorded.StoryID
+						result["stage"] = string(recorded.Stage)
+					}
+					if hydratedFile != "" {
+						result["hydrated_file"] = hydratedFile
+					}
+					return emitJSONStdout(commandPathSansRoot(c),
+						map[string]any{"key": idemKey, "status": string(status)},
+						result, nil)
+				}
 				fmt.Printf("dispatch returned by key=%s: %s (tokens %d:%d:%d:%d, %dms)\n",
 					idemKey, status,
 					inputTokens, outputTokens, cacheRead, cacheCreate, durationMS)
@@ -328,6 +349,25 @@ stage=hydrate AND status=ok.`,
 			// Issue #21 gap 3 (a): auto-release the claim on success.
 			if err := releaseClaimOnOK(ctx, stories, storyID, status); err != nil {
 				fmt.Fprintf(os.Stderr, "WARN: %v\n", err)
+			}
+			if jsonOutput {
+				result := map[string]any{
+					"dispatch_id":         id,
+					"story_id":            storyID,
+					"stage":               string(stage),
+					"status":              string(status),
+					"input_tokens":        inputTokens,
+					"output_tokens":       outputTokens,
+					"cache_read_tokens":   cacheRead,
+					"cache_create_tokens": cacheCreate,
+					"duration_ms":         durationMS,
+				}
+				if hydratedFile != "" {
+					result["hydrated_file"] = hydratedFile
+				}
+				return emitJSONStdout(commandPathSansRoot(c),
+					map[string]any{"story_id": storyID, "stage": string(stage), "status": string(status)},
+					result, nil)
 			}
 			fmt.Printf("dispatch %d recorded: %s/%s/%s (tokens %d:%d:%d:%d, %dms)\n",
 				id, storyID, stage, status,

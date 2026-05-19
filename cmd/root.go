@@ -48,6 +48,10 @@ so Claude does not need to write inline Python or bash scripts.`,
 	root.Flags().BoolP("version", "v", false, "print the bmad-cli version, commit, and build date")
 
 	root.PersistentFlags().BoolVar(&noLog, "no-log", false, "Disable audit logging for this invocation")
+	// --json: opt-in machine-readable output across every command. See
+	// cmd/jsonout.go for the v1 envelope contract. Commands honor this by
+	// branching on the `jsonOutput` package variable.
+	root.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Emit output as a JSON envelope (schema v1)")
 
 	root.AddCommand(
 		newInitCmd(),       // v6 — sqlite init
