@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -24,6 +25,18 @@ import (
 // Existing dispatches that already have a bundle on disk are not affected by
 // the flag at read-time — only bundle BUILDS consult it.
 const EnvIncludeAtlas = "BMAD_CONTEXT_BUNDLE_INCLUDE_ATLAS"
+
+// EnvCacheMaxFiles overrides DefaultCacheMaxFiles for the per-directory cap on
+// retained codeindex cache files. Set to a positive integer to change the
+// budget; values <= 0 (or unparseable strings) fall back to the default.
+const EnvCacheMaxFiles = "BMAD_CACHE_MAX_FILES"
+
+// DefaultCacheMaxFiles caps how many <head>.json cache files we retain in any
+// single cache directory. After each write we count siblings and delete the
+// oldest-by-mtime until we're back at the cap. A ~10MB-per-file payload over
+// a typical N=5 budget keeps the directory under 50MB even on long-lived
+// checkouts that scan many HEADs.
+const DefaultCacheMaxFiles = 5
 
 // DefaultCodeContextMaxHops is the dependency-graph walk depth. 2 hops keeps
 // the output bounded (typical fanout per symbol is 3-5) while still surfacing
@@ -251,6 +264,81 @@ func writeCachedIndex(path string, idx *codeindex.Index, logger shared.Logger) {
 	if err := os.Rename(tmp, path); err != nil {
 		logger.Warn(context.Background(), "code context: cache rename",
 			"path", path, "err", err.Error())
+		return
+	}
+
+	evictOldCacheFiles(filepath.Dir(path), cacheMaxFiles(), logger)
+}
+
+// cacheMaxFiles returns the configured per-directory cap. BMAD_CACHE_MAX_FILES
+// overrides the default when set to a positive integer; otherwise the default
+// is used. We treat unparseable / non-positive values as "use the default" so
+// a typo never disables eviction silently.
+func cacheMaxFiles() int {
+	raw := strings.TrimSpace(os.Getenv(EnvCacheMaxFiles))
+	if raw == "" {
+		return DefaultCacheMaxFiles
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return DefaultCacheMaxFiles
+	}
+	return n
+}
+
+// evictOldCacheFiles enforces a per-directory cap on `*.json` cache files.
+// When the count exceeds `max`, the oldest-by-mtime entries are removed until
+// the count is back at `max`. Eviction failures are logged but never returned
+// — the cache write itself already succeeded by this point, and we don't want
+// a stuck file to fail the bundle build.
+//
+// Only files with a `.json` suffix are considered. Sub-directories, dot-files,
+// and the `<head>.json.tmp` rename-staging files are ignored.
+func evictOldCacheFiles(dir string, max int, logger shared.Logger) {
+	if max <= 0 {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		logger.Warn(context.Background(), "code context: cache evict readdir",
+			"dir", dir, "err", err.Error())
+		return
+	}
+	type cachedFile struct {
+		path  string
+		mtime int64
+	}
+	files := make([]cachedFile, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, cachedFile{
+			path:  filepath.Join(dir, name),
+			mtime: info.ModTime().UnixNano(),
+		})
+	}
+	if len(files) <= max {
+		return
+	}
+	// Sort oldest-first (ascending mtime).
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].mtime < files[j].mtime
+	})
+	toEvict := len(files) - max
+	for i := 0; i < toEvict; i++ {
+		if err := os.Remove(files[i].path); err != nil {
+			logger.Warn(context.Background(), "code context: cache evict",
+				"path", files[i].path, "err", err.Error())
+		}
 	}
 }
 

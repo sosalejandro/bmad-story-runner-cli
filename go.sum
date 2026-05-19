@@ -20,8 +20,8 @@ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZN
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
-github.com/sosalejandro/atlas v0.0.0-20260518085730-ae2e4e1b51d2 h1:P8CU7N2zAf/sXjfgp2IIJLe6f9PrMRsow6WZ0Yovm5M=
-github.com/sosalejandro/atlas v0.0.0-20260518085730-ae2e4e1b51d2/go.mod h1:VFA+f1picf8asZGkVKhKFwHvy05Xeg+U5QjVca40+jE=
+github.com/sosalejandro/atlas v0.1.2 h1:9Y15BD6pXwewFkgC7rbfmhXKaZBJrYg4+d3IPtyjyvc=
+github.com/sosalejandro/atlas v0.1.2/go.mod h1:VFA+f1picf8asZGkVKhKFwHvy05Xeg+U5QjVca40+jE=
 github.com/spf13/cobra v1.10.2 h1:DMTTonx5m65Ic0GOoRY2c16WCbHxOOw6xxezuLaBpcU=
 github.com/spf13/cobra v1.10.2/go.mod h1:7C1pvHqHw5A4vrJfjNwvOdzYu0Gml16OCs2GRiTUUS4=
 github.com/spf13/pflag v1.0.9 h1:9exaQaMOCwffKiiiYk6/BndUBv+iRViNW+4lEMi0PvY=

@@ -3,7 +3,7 @@ module github.com/sosalejandro/bmad-story-runner-cli
 go 1.25.7
 
 require (
-	github.com/sosalejandro/atlas v0.0.0-20260518085730-ae2e4e1b51d2
+	github.com/sosalejandro/atlas v0.1.2
 	github.com/spf13/cobra v1.10.2
 	go.uber.org/zap v1.27.1
 	gopkg.in/yaml.v3 v3.0.1
