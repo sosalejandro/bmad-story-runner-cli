@@ -265,6 +265,51 @@ func (s *StoriesStore) SetCurrentStage(ctx context.Context, id string, stage *st
 	return nil
 }
 
+// SetHydratedFile writes stories.hydrated_file with idempotency safety.
+// First-write-wins by default: if the column is already non-NULL and
+// overwrite=false, the call returns state.ErrAlreadySet without mutating
+// anything. The caller (typically `bmad dispatch record --hydrated-file`)
+// can pass overwrite=true to deliberately replace a prior value — that's
+// the explicit re-hydrate path.
+func (s *StoriesStore) SetHydratedFile(ctx context.Context, id, hydratedFile string, overwrite bool) error {
+	if hydratedFile == "" {
+		return fmt.Errorf("stories set-hydrated-file %q: empty path", id)
+	}
+	tx, err := s.db.sqlDB().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("stories set-hydrated-file %q: begin: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var existing sql.NullString
+	if err := tx.QueryRowContext(ctx,
+		`SELECT hydrated_file FROM stories WHERE id = ?`, id).
+		Scan(&existing); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return state.ErrNotFound
+		}
+		return fmt.Errorf("stories set-hydrated-file %q: read: %w", id, err)
+	}
+	if existing.Valid && existing.String != "" && existing.String != hydratedFile && !overwrite {
+		return state.ErrAlreadySet
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE stories SET hydrated_file = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		hydratedFile, id)
+	if err != nil {
+		return fmt.Errorf("stories set-hydrated-file %q: update: %w", id, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return state.ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("stories set-hydrated-file %q: commit: %w", id, err)
+	}
+	return nil
+}
+
 func (s *StoriesStore) SetComplete(ctx context.Context, id, commitHash, prURL string) error {
 	res, err := s.db.sqlDB().ExecContext(ctx, `
 		UPDATE stories SET

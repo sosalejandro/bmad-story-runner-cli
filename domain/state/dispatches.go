@@ -18,6 +18,13 @@ type Dispatches interface {
 	// post-Task() recording step, where the key was generated up-front.
 	MarkReturnedByKey(ctx context.Context, idempotencyKey string, status DispatchStatus, reason string, tokens TokenCounts, model string, durationMS int64, returnedAt time.Time) error
 
+	// GetByKey returns the dispatch row with the given idempotency_key, or
+	// ErrNotFound. Read-only lookup used by `bmad dispatch record
+	// --hydrated-file` to discover the row's story_id + stage when the
+	// caller passed --key (the positional form already has those values).
+	// Issue #21 gap 2.
+	GetByKey(ctx context.Context, idempotencyKey string) (Dispatch, error)
+
 	// InFlight returns dispatches that were recorded (status=dispatched) but
 	// never returned (returned_at IS NULL). Crash-recovery reads this to
 	// decide which rows to reconcile.

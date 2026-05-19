@@ -22,6 +22,15 @@ type Stories interface {
 	SetStatus(ctx context.Context, id string, status Status) error
 	SetCurrentStage(ctx context.Context, id string, stage *Stage) error
 	SetComplete(ctx context.Context, id string, commitHash, prURL string) error
+	// SetHydratedFile writes stories.hydrated_file. Called by
+	// `bmad dispatch record --stage hydrate --status ok --hydrated-file <p>`
+	// so the L1 orchestrator no longer has to touch SQLite directly to
+	// satisfy the `.HydratedFile` slot in stage_atdd / stage_implement
+	// templates (issue #21 gap 2). The `overwrite` flag guards against
+	// accidentally clobbering a prior hydrate dispatch's output — pass
+	// false for the typical hydrate-success path, true only when the
+	// caller explicitly opts in to replace.
+	SetHydratedFile(ctx context.Context, id string, hydratedFile string, overwrite bool) error
 
 	// ClaimUnclaimedPending atomically picks up to `max` unclaimed stories
 	// whose status is pending AND whose ids are in `eligibleIDs`, marks them
