@@ -145,17 +145,19 @@ func newDispatchInFlightCmd() *cobra.Command {
 
 func newDispatchRecordCmd() *cobra.Command {
 	var (
-		agentRole    string
-		attemptNo    int
-		reason       string
-		inputTokens  int64
-		outputTokens int64
-		cacheRead    int64
-		cacheCreate  int64
-		totalTokens  int64
-		model        string
-		durationMS   int64
-		idemKey      string
+		agentRole             string
+		attemptNo             int
+		reason                string
+		inputTokens           int64
+		outputTokens          int64
+		cacheRead             int64
+		cacheCreate           int64
+		totalTokens           int64
+		model                 string
+		durationMS            int64
+		idemKey               string
+		hydratedFile          string
+		overwriteHydratedFile bool
 	)
 	cmd := &cobra.Command{
 		Use:   "record [<story-id> <stage> <status>]",
@@ -176,7 +178,16 @@ Token accounting (issue #15): pass the four breakdown axes
 --cache-create-tokens) when the subagent's <usage> block provides
 them — this is what powers the cache_hit_rate column in
 ` + "`bmad sprint status`" + `. ` + "`--total-tokens`" + ` is kept for backward compat:
-provide either form, or both (the latter validates the sum).`,
+provide either form, or both (the latter validates the sum).
+
+Hydrated-file recording (issue #21 gap 2): when ` + "`--stage hydrate`" + ` succeeds,
+pass ` + "`--hydrated-file <path>`" + ` to write stories.hydrated_file in the same
+operation. The L1 orchestrator no longer has to touch SQLite directly to
+satisfy the .HydratedFile slot in stage_atdd / stage_implement templates.
+By default the write refuses to clobber a non-empty existing value (the
+prior hydrate's output); pass ` + "`--overwrite-hydrated-file`" + ` to opt in to
+replacement. Validation: ` + "`--hydrated-file`" + ` is only honored when
+stage=hydrate AND status=ok.`,
 		Args: cobra.MaximumNArgs(3),
 		RunE: func(c *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -186,6 +197,7 @@ provide either form, or both (the latter validates the sum).`,
 			}
 			defer db.Close()
 			store := sqlite.NewDispatchesStore(db)
+			stories := sqlite.NewStoriesStore(db)
 			now := time.Now().UTC()
 
 			// Issue #15: reconcile --total-tokens with the 4-axis breakdown.
@@ -224,6 +236,46 @@ provide either form, or both (the latter validates the sum).`,
 						return fmt.Errorf("dispatch record: no row matches idempotency key %q (already recorded? wrong key?)", idemKey)
 					}
 					return err
+				}
+				// Look up the row once for any post-record state work that
+				// needs story_id / stage (hydrated-file + claim release).
+				var (
+					recorded   state.Dispatch
+					recordedOK bool
+				)
+				if hydratedFile != "" || status == state.DispatchOK {
+					d, gerr := store.GetByKey(ctx, idemKey)
+					if gerr != nil {
+						// Lookup failure for the post-record bookkeeping is
+						// not fatal — the dispatch row IS recorded.
+						// Print a warning so an operator notices.
+						fmt.Fprintf(os.Stderr,
+							"WARN: dispatch %s recorded by key but follow-up lookup failed: %v\n",
+							idemKey, gerr)
+					} else {
+						recorded = d
+						recordedOK = true
+					}
+				}
+				// Issue #21 gap 2: write stories.hydrated_file when this is
+				// a successful hydrate dispatch.
+				if hydratedFile != "" && recordedOK {
+					if err := applyHydratedFile(ctx, stories, recorded.StoryID, recorded.Stage, status, hydratedFile, overwriteHydratedFile); err != nil {
+						return err
+					}
+				}
+				// Issue #21 gap 3 (a): auto-release the claim on success.
+				// Without this, crashed orchestrator sessions that never
+				// reached `bmad story complete` left stories permanently
+				// claimed.
+				if recordedOK {
+					if err := releaseClaimOnOK(ctx, stories, recorded.StoryID, status); err != nil {
+						// Release failure isn't fatal — the dispatch row IS
+						// recorded. Surface as a warning so the operator
+						// notices the stale claim and reaps manually if
+						// needed.
+						fmt.Fprintf(os.Stderr, "WARN: %v\n", err)
+					}
 				}
 				fmt.Printf("dispatch returned by key=%s: %s (tokens %d:%d:%d:%d, %dms)\n",
 					idemKey, status,
@@ -267,6 +319,16 @@ provide either form, or both (the latter validates the sum).`,
 			if err != nil {
 				return err
 			}
+			// Issue #21 gap 2: same hydrated-file flow for the positional form.
+			if hydratedFile != "" {
+				if err := applyHydratedFile(ctx, stories, storyID, stage, status, hydratedFile, overwriteHydratedFile); err != nil {
+					return err
+				}
+			}
+			// Issue #21 gap 3 (a): auto-release the claim on success.
+			if err := releaseClaimOnOK(ctx, stories, storyID, status); err != nil {
+				fmt.Fprintf(os.Stderr, "WARN: %v\n", err)
+			}
 			fmt.Printf("dispatch %d recorded: %s/%s/%s (tokens %d:%d:%d:%d, %dms)\n",
 				id, storyID, stage, status,
 				inputTokens, outputTokens, cacheRead, cacheCreate, durationMS)
@@ -285,7 +347,73 @@ provide either form, or both (the latter validates the sum).`,
 	cmd.Flags().Int64Var(&totalTokens, "total-tokens", 0, "deprecated: total tokens (use the 4 breakdown flags instead; issue #15)")
 	cmd.Flags().StringVar(&model, "model", "", "model identifier")
 	cmd.Flags().Int64Var(&durationMS, "duration-ms", 0, "dispatch wall-clock duration in ms")
+	cmd.Flags().StringVar(&hydratedFile, "hydrated-file", "", "write stories.hydrated_file when --stage hydrate succeeds (issue #21 gap 2)")
+	cmd.Flags().BoolVar(&overwriteHydratedFile, "overwrite-hydrated-file", false, "allow --hydrated-file to overwrite a prior non-empty value (default: refuse)")
 	return cmd
+}
+
+// applyHydratedFile guards the --hydrated-file flag's gates and writes the
+// stories.hydrated_file column. Used by both the key-based and positional
+// branches of `bmad dispatch record` (issue #21 gap 2).
+//
+// Validation:
+//   - stage MUST be "hydrate" — recording a non-hydrate stage with
+//     --hydrated-file is a user error (the flag wouldn't have produced a
+//     useful row anywhere else).
+//   - status MUST be "ok" — only successful hydrate dispatches yield a
+//     real path. Blocked/errored hydrates leave hydrated_file untouched.
+func applyHydratedFile(
+	ctx context.Context,
+	stories interface {
+		SetHydratedFile(ctx context.Context, id, hydratedFile string, overwrite bool) error
+	},
+	storyID string,
+	stage state.Stage,
+	status state.DispatchStatus,
+	hydratedFile string,
+	overwrite bool,
+) error {
+	if stage != state.StageHydrate {
+		return fmt.Errorf("dispatch record: --hydrated-file only valid with --stage hydrate (got %q)", stage)
+	}
+	if status != state.DispatchOK {
+		return fmt.Errorf("dispatch record: --hydrated-file requires --status ok (got %q)", status)
+	}
+	if err := stories.SetHydratedFile(ctx, storyID, hydratedFile, overwrite); err != nil {
+		if errors.Is(err, state.ErrAlreadySet) {
+			return fmt.Errorf("dispatch record: stories.hydrated_file already populated for %q; pass --overwrite-hydrated-file to replace", storyID)
+		}
+		return fmt.Errorf("dispatch record: set hydrated_file: %w", err)
+	}
+	return nil
+}
+
+// releaseClaimOnOK is the seam for issue #21 gap 3 (a): a successful
+// dispatch frees its claim so the next orchestrator iteration is free to
+// pick the story again (or move it to the next stage). Idempotent — the
+// underlying ReleaseClaim is safe to call on an already-clear row.
+// Returns nil even when status != ok (the caller always invokes it; the
+// gate lives here so the cmd body stays linear).
+//
+// Defensive: a ReleaseClaim error never blocks the dispatch from being
+// considered "recorded" — we WARN instead, because the row is already in
+// SQLite and rolling back the claim release would be the inverse of the
+// intent (leaving a stale claim).
+func releaseClaimOnOK(
+	ctx context.Context,
+	stories interface {
+		ReleaseClaim(ctx context.Context, id string) error
+	},
+	storyID string,
+	status state.DispatchStatus,
+) error {
+	if status != state.DispatchOK {
+		return nil
+	}
+	if err := stories.ReleaseClaim(ctx, storyID); err != nil {
+		return fmt.Errorf("dispatch record: release claim for %q: %w", storyID, err)
+	}
+	return nil
 }
 
 // cacheHitRate returns cache_read / (input + cache_read) as a percentage

@@ -82,6 +82,25 @@ func (s *DispatchesStore) MarkReturnedByKey(
 	return nil
 }
 
+// GetByKey returns the dispatch row by idempotency_key. Read-only; used by
+// `bmad dispatch record --key ... --hydrated-file` to discover the row's
+// story_id + stage before mutating stories.hydrated_file.
+func (s *DispatchesStore) GetByKey(ctx context.Context, key string) (state.Dispatch, error) {
+	if key == "" {
+		return state.Dispatch{}, fmt.Errorf("dispatches get-by-key: empty key")
+	}
+	row := s.db.sqlDB().QueryRowContext(ctx,
+		`SELECT `+dispatchesSelectCols+` FROM dispatches WHERE idempotency_key = ?`, key)
+	d, err := scanDispatch(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return state.Dispatch{}, state.ErrNotFound
+	}
+	if err != nil {
+		return state.Dispatch{}, fmt.Errorf("dispatches get-by-key %q: %w", key, err)
+	}
+	return d, nil
+}
+
 // InFlight returns dispatches that were recorded (status=dispatched) but never
 // returned. Crash-recovery uses this to drive reconciliation.
 func (s *DispatchesStore) InFlight(ctx context.Context) ([]state.Dispatch, error) {

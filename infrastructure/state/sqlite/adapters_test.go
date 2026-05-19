@@ -414,6 +414,78 @@ func TestDepguard_FlipAndHistory(t *testing.T) {
 	}
 }
 
+// ---------- Stories.ReapStaleClaims (issue #21 gap 3) ----------
+
+func TestStories_ReapStaleClaims_ReapsOnlyStaleNonComplete(t *testing.T) {
+	t.Parallel()
+	db := newTempDB(t)
+	store := sqlite.NewStoriesStore(db)
+	ctx := context.Background()
+
+	// Three rows: a stale non-complete claim (reap target), a fresh claim
+	// (preserve), and a stale claim on a complete story (preserve audit).
+	seedStory(t, db, "stale-pending")
+	seedStory(t, db, "fresh-pending")
+	seedStory(t, db, "stale-complete")
+
+	// Fresh claim on all three.
+	if _, err := store.ClaimUnclaimedPending(ctx, []string{"stale-pending", "fresh-pending", "stale-complete"}, 10, "orchestrator"); err != nil {
+		t.Fatalf("claim 3: %v", err)
+	}
+	// Backdate the stale ones via the test helper (lives in
+	// `internal_test.go` inside package sqlite for access to sqlDB()).
+	sqlite.BackdateClaimForTest(t, db, "stale-pending", 1000)
+	sqlite.BackdateClaimForTest(t, db, "stale-complete", 1000)
+	if err := store.SetStatus(ctx, "stale-complete", state.StatusComplete); err != nil {
+		t.Fatalf("set status complete: %v", err)
+	}
+
+	reaped, err := store.ReapStaleClaims(ctx, 600)
+	if err != nil {
+		t.Fatalf("ReapStaleClaims: %v", err)
+	}
+	if len(reaped) != 1 || reaped[0] != "stale-pending" {
+		t.Fatalf("reaped = %v, want [stale-pending]", reaped)
+	}
+
+	sp, _ := store.Get(ctx, "stale-pending")
+	if sp.ClaimedAt != nil {
+		t.Errorf("stale-pending claim not cleared: %v", sp.ClaimedAt)
+	}
+	fp, _ := store.Get(ctx, "fresh-pending")
+	if fp.ClaimedAt == nil {
+		t.Errorf("fresh-pending claim cleared — should be preserved")
+	}
+	sc, _ := store.Get(ctx, "stale-complete")
+	if sc.ClaimedAt == nil {
+		t.Errorf("stale-complete claim cleared — should be preserved (audit)")
+	}
+}
+
+func TestStories_ReapStaleClaims_TTLZeroDisablesReaper(t *testing.T) {
+	t.Parallel()
+	db := newTempDB(t)
+	store := sqlite.NewStoriesStore(db)
+	ctx := context.Background()
+	seedStory(t, db, "x")
+	if _, err := store.ClaimUnclaimedPending(ctx, []string{"x"}, 1, "orchestrator"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	sqlite.BackdateClaimForTest(t, db, "x", 10000)
+
+	reaped, err := store.ReapStaleClaims(ctx, 0)
+	if err != nil {
+		t.Fatalf("reap: %v", err)
+	}
+	if len(reaped) != 0 {
+		t.Errorf("ttl=0 should disable reaper, got reaped=%v", reaped)
+	}
+	got, _ := store.Get(ctx, "x")
+	if got.ClaimedAt == nil {
+		t.Errorf("ttl=0 reaped a claim it shouldn't have")
+	}
+}
+
 // ---------- Compile-time interface checks ----------
 
 var (

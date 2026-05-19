@@ -265,6 +265,51 @@ func (s *StoriesStore) SetCurrentStage(ctx context.Context, id string, stage *st
 	return nil
 }
 
+// SetHydratedFile writes stories.hydrated_file with idempotency safety.
+// First-write-wins by default: if the column is already non-NULL and
+// overwrite=false, the call returns state.ErrAlreadySet without mutating
+// anything. The caller (typically `bmad dispatch record --hydrated-file`)
+// can pass overwrite=true to deliberately replace a prior value — that's
+// the explicit re-hydrate path.
+func (s *StoriesStore) SetHydratedFile(ctx context.Context, id, hydratedFile string, overwrite bool) error {
+	if hydratedFile == "" {
+		return fmt.Errorf("stories set-hydrated-file %q: empty path", id)
+	}
+	tx, err := s.db.sqlDB().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("stories set-hydrated-file %q: begin: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var existing sql.NullString
+	if err := tx.QueryRowContext(ctx,
+		`SELECT hydrated_file FROM stories WHERE id = ?`, id).
+		Scan(&existing); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return state.ErrNotFound
+		}
+		return fmt.Errorf("stories set-hydrated-file %q: read: %w", id, err)
+	}
+	if existing.Valid && existing.String != "" && existing.String != hydratedFile && !overwrite {
+		return state.ErrAlreadySet
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE stories SET hydrated_file = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		hydratedFile, id)
+	if err != nil {
+		return fmt.Errorf("stories set-hydrated-file %q: update: %w", id, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return state.ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("stories set-hydrated-file %q: commit: %w", id, err)
+	}
+	return nil
+}
+
 func (s *StoriesStore) SetComplete(ctx context.Context, id, commitHash, prURL string) error {
 	res, err := s.db.sqlDB().ExecContext(ctx, `
 		UPDATE stories SET
@@ -383,4 +428,69 @@ func (s *StoriesStore) ReleaseClaim(ctx context.Context, id string) error {
 		return fmt.Errorf("stories release-claim %q: %w", id, err)
 	}
 	return nil
+}
+
+// ReapStaleClaims clears claimed_at + claimed_by on every non-complete
+// story whose claim is older than ttlSeconds. Returns the ids that were
+// reaped so the caller can log them. ttlSeconds <= 0 disables the reaper
+// (returns nil, nil) — useful for tests that want to assert "no implicit
+// reaping happened".
+//
+// Implementation note: SQLite's strftime arithmetic uses unixepoch math
+// directly, no driver-specific datetime parsing. The complete-status
+// filter avoids reaping completed stories whose claim audit we want to
+// preserve.
+func (s *StoriesStore) ReapStaleClaims(ctx context.Context, ttlSeconds int) ([]string, error) {
+	if ttlSeconds <= 0 {
+		return nil, nil
+	}
+	tx, err := s.db.sqlDB().BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("stories reap-stale-claims: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id FROM stories
+		 WHERE claimed_at IS NOT NULL
+		   AND status != ?
+		   AND (strftime('%s','now') - strftime('%s', claimed_at)) > ?
+		 ORDER BY id
+	`, string(state.StatusComplete), ttlSeconds)
+	if err != nil {
+		return nil, fmt.Errorf("stories reap-stale-claims: query: %w", err)
+	}
+	var reaped []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("stories reap-stale-claims: scan: %w", err)
+		}
+		reaped = append(reaped, id)
+	}
+	_ = rows.Close()
+	if len(reaped) == 0 {
+		_ = tx.Commit()
+		return nil, nil
+	}
+
+	placeholders := strings.Repeat("?,", len(reaped))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, len(reaped))
+	for _, id := range reaped {
+		args = append(args, id)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE stories
+		   SET claimed_at = NULL, claimed_by = NULL,
+		       updated_at = CURRENT_TIMESTAMP
+		 WHERE id IN (`+placeholders+`)
+	`, args...); err != nil {
+		return nil, fmt.Errorf("stories reap-stale-claims: update: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("stories reap-stale-claims: commit: %w", err)
+	}
+	return reaped, nil
 }

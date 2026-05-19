@@ -22,6 +22,15 @@ type Stories interface {
 	SetStatus(ctx context.Context, id string, status Status) error
 	SetCurrentStage(ctx context.Context, id string, stage *Stage) error
 	SetComplete(ctx context.Context, id string, commitHash, prURL string) error
+	// SetHydratedFile writes stories.hydrated_file. Called by
+	// `bmad dispatch record --stage hydrate --status ok --hydrated-file <p>`
+	// so the L1 orchestrator no longer has to touch SQLite directly to
+	// satisfy the `.HydratedFile` slot in stage_atdd / stage_implement
+	// templates (issue #21 gap 2). The `overwrite` flag guards against
+	// accidentally clobbering a prior hydrate dispatch's output — pass
+	// false for the typical hydrate-success path, true only when the
+	// caller explicitly opts in to replace.
+	SetHydratedFile(ctx context.Context, id string, hydratedFile string, overwrite bool) error
 
 	// ClaimUnclaimedPending atomically picks up to `max` unclaimed stories
 	// whose status is pending AND whose ids are in `eligibleIDs`, marks them
@@ -38,12 +47,32 @@ type Stories interface {
 	// called on completion, on error-after-claim, or by the orchestrator's
 	// crash-resume reconciler when it decides to give a story back.
 	ReleaseClaim(ctx context.Context, id string) error
+
+	// ReapStaleClaims clears claimed_at + claimed_by for stories whose
+	// claim is older than ttlSeconds AND whose status is NOT complete.
+	// Returns the ids that were reaped (caller emits a warning per id so
+	// an operator can see the orchestrator-crash residue being cleaned up).
+	// Issue #21 gap 3 — bare-minimum recovery path so a crashed
+	// orchestrator session doesn't permanently lock a story.
+	//
+	// Skipping complete stories is deliberate: SetComplete already clears
+	// the claim, so a stale-but-complete row is a no-op; not reaping it
+	// keeps the audit trail of who finished it.
+	ReapStaleClaims(ctx context.Context, ttlSeconds int) ([]string, error)
 }
 
 // StoryDependencies is the m:n bridge between a story and its prerequisites.
 type StoryDependencies interface {
 	Add(ctx context.Context, storyID, dependsOnID string) error
 	Remove(ctx context.Context, storyID, dependsOnID string) error
+	// RemoveAllFor deletes every dependency edge for storyID. Used by
+	// `bmad sprint plan` to make re-ingest idempotent: when an operator
+	// relaxes `depends_on` for a story (e.g. ["1.4"] → []), the planner
+	// must drop the stale row(s) before re-inserting whatever the new
+	// frontmatter declares. Without this, `bmad story next` continues to
+	// see the old (unsatisfied) edge and skips the story forever.
+	// No-op (not an error) if the story has no dependency rows.
+	RemoveAllFor(ctx context.Context, storyID string) error
 	Of(ctx context.Context, storyID string) ([]string, error)
 	DependentsOf(ctx context.Context, storyID string) ([]string, error)
 }
@@ -53,6 +82,14 @@ type StoryDependencies interface {
 type StoryAffects interface {
 	Add(ctx context.Context, storyID, path string) error
 	Remove(ctx context.Context, storyID, path string) error
+	// RemoveAllFor deletes every affects row for storyID. Used by
+	// `bmad sprint plan` to make re-ingest idempotent: when an operator
+	// removes a path from a story's `affects` list, the planner must
+	// drop the stale row(s) before re-inserting the new set — otherwise
+	// file-overlap detection in `bmad story next` keeps splitting batches
+	// for a path that's no longer claimed. No-op (not an error) if the
+	// story has no affects rows.
+	RemoveAllFor(ctx context.Context, storyID string) error
 	Of(ctx context.Context, storyID string) ([]string, error)
 	StoriesAffecting(ctx context.Context, path string) ([]string, error)
 }
