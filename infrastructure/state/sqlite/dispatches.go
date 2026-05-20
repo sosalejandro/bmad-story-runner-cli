@@ -249,3 +249,106 @@ func (s *DispatchesStore) TokenRollupForStory(ctx context.Context, storyID strin
 	}
 	return t, nil
 }
+
+// CacheHitRateStats holds the result of a per-story cache hit rate aggregate.
+// When Unknown is true, no rows had non-zero token breakdown data (issue #42,
+// Path 3: all-zero TOKEN_BREAKDOWN rows from L3 agents are treated as "value
+// unknown", not as measured 0% cache hit rate).
+type CacheHitRateStats struct {
+	StoryID     string
+	Unknown     bool    // true when no breakdown rows had non-zero data
+	RatePercent float64 // cache_read / (input + cache_read) * 100; 0 when Unknown
+	RowsCounted int     // rows with non-zero breakdown (used in rate calculation)
+	RowsTotal   int     // all dispatch rows for the story
+}
+
+// CacheHitRate computes cache_read / (input + cache_read) as a percentage for
+// the given story, skipping all-zero TOKEN_BREAKDOWN rows (issue #42).
+//
+// Sentinel detection: a row where input + output + cache_read + cache_create = 0
+// is considered "breakdown unknown" (L3 agent couldn't introspect its own usage
+// block). Such rows are excluded from both the numerator and denominator of the
+// rate, but are counted in RowsTotal so callers can see the full picture.
+//
+// Returns Unknown=true when RowsCounted=0 (no rows with measurable data).
+func (s *DispatchesStore) CacheHitRate(ctx context.Context, storyID string) (CacheHitRateStats, error) {
+	var (
+		cacheReadSum int64
+		denomSum     int64 // SUM(input_tokens + cache_read_tokens) for non-zero rows
+		rowsCounted  int
+		rowsTotal    int
+	)
+	// Use CASE WHEN inside SUM for widest SQLite compatibility, even though
+	// modernc.org/sqlite 1.50.x supports FILTER. CASE WHEN is equivalent
+	// and avoids any driver-level surprises.
+	err := s.db.sqlDB().QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(CASE WHEN (input_tokens + output_tokens + cache_read_tokens + cache_create_tokens) > 0
+			              THEN cache_read_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN (input_tokens + output_tokens + cache_read_tokens + cache_create_tokens) > 0
+			              THEN input_tokens + cache_read_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN (input_tokens + output_tokens + cache_read_tokens + cache_create_tokens) > 0
+			              THEN 1 ELSE 0 END), 0),
+			COUNT(*)
+		FROM dispatches
+		WHERE story_id = ?
+	`, storyID).Scan(&cacheReadSum, &denomSum, &rowsCounted, &rowsTotal)
+	if err != nil {
+		return CacheHitRateStats{}, fmt.Errorf("dispatches cache-hit-rate %q: %w", storyID, err)
+	}
+
+	stats := CacheHitRateStats{
+		StoryID:     storyID,
+		RowsCounted: rowsCounted,
+		RowsTotal:   rowsTotal,
+	}
+	if rowsCounted == 0 {
+		stats.Unknown = true
+		return stats, nil
+	}
+	if denomSum > 0 {
+		stats.RatePercent = float64(cacheReadSum) / float64(denomSum) * 100.0
+	}
+	return stats, nil
+}
+
+// CacheHitRateSince computes the sprint-level cache hit rate across all
+// dispatch rows since the given time, using the same sentinel-detection
+// logic as CacheHitRate: rows where all four token fields are zero are
+// treated as "value unknown" and excluded from the aggregate.
+func (s *DispatchesStore) CacheHitRateSince(ctx context.Context, since time.Time) (CacheHitRateStats, error) {
+	var (
+		cacheReadSum int64
+		denomSum     int64
+		rowsCounted  int
+		rowsTotal    int
+	)
+	err := s.db.sqlDB().QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(CASE WHEN (input_tokens + output_tokens + cache_read_tokens + cache_create_tokens) > 0
+			              THEN cache_read_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN (input_tokens + output_tokens + cache_read_tokens + cache_create_tokens) > 0
+			              THEN input_tokens + cache_read_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN (input_tokens + output_tokens + cache_read_tokens + cache_create_tokens) > 0
+			              THEN 1 ELSE 0 END), 0),
+			COUNT(*)
+		FROM dispatches
+		WHERE dispatched_at >= ?
+	`, since).Scan(&cacheReadSum, &denomSum, &rowsCounted, &rowsTotal)
+	if err != nil {
+		return CacheHitRateStats{}, fmt.Errorf("dispatches cache-hit-rate-since: %w", err)
+	}
+
+	stats := CacheHitRateStats{
+		RowsCounted: rowsCounted,
+		RowsTotal:   rowsTotal,
+	}
+	if rowsCounted == 0 {
+		stats.Unknown = true
+		return stats, nil
+	}
+	if denomSum > 0 {
+		stats.RatePercent = float64(cacheReadSum) / float64(denomSum) * 100.0
+	}
+	return stats, nil
+}
