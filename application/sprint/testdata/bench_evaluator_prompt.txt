@@ -1,0 +1,8 @@
+You are reading a story implementation prompt as if you were the L3 implementer agent about to begin work. Your task: enumerate the FIRST 10 discovery actions you would take to scope the implementation. A discovery action is a Read, Grep, Glob, or find call. Output ONLY a JSON array of action descriptors, one per element, like:
+
+[
+  {"tool": "Read", "path": "src/auth/login.go"},
+  {"tool": "Grep", "pattern": "func Login", "path": "src/"}
+]
+
+Do NOT propose code edits, do NOT propose implementation steps — only the discovery actions you'd take to understand the codebase before beginning. Stop after 10 actions or when you have enough context.
