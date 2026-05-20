@@ -309,6 +309,10 @@ func newSprintStatusCmd() *cobra.Command {
 			}
 
 			tokens, _ := dispatches.TokenRollupSince(ctx, time.Unix(0, 0))
+			// Issue #42 (Path 3): compute cache hit rate using sentinel detection
+			// so all-zero TOKEN_BREAKDOWN rows from L3 agents are treated as
+			// "value unknown" rather than being aggregated into a false "0%".
+			cacheStats, _ := dispatches.CacheHitRateSince(ctx, time.Unix(0, 0))
 
 			unresolved, _ := checkpoints.Unresolved(ctx)
 			paused, _ := cfg.Get(ctx, sprintPausedKey)
@@ -316,23 +320,33 @@ func newSprintStatusCmd() *cobra.Command {
 
 			// Issue #15: surface the 4-axis breakdown + cache_hit_rate so
 			// downstream dashboards can see cache health at a glance.
+			// Issue #42: replace the naive cacheHitRate(tokens) call with the
+			// sentinel-aware aggregate; "unknown" when no non-zero rows exist.
+			var cacheHitRateVal any
+			if cacheStats.Unknown {
+				cacheHitRateVal = "unknown (issue #42)"
+			} else {
+				cacheHitRateVal = cacheStats.RatePercent
+			}
 			tokenBreakdown := map[string]any{
-				"input":           tokens.Input,
-				"output":          tokens.Output,
-				"cache_read":      tokens.CacheRead,
-				"cache_create":    tokens.CacheCreate,
-				"total":           tokens.Input + tokens.Output + tokens.CacheRead + tokens.CacheCreate,
-				"cache_hit_rate":  cacheHitRate(tokens),
+				"input":          tokens.Input,
+				"output":         tokens.Output,
+				"cache_read":     tokens.CacheRead,
+				"cache_create":   tokens.CacheCreate,
+				"total":          tokens.Input + tokens.Output + tokens.CacheRead + tokens.CacheCreate,
+				"cache_hit_rate": cacheHitRateVal,
+				"cache_hit_rate_rows_counted": cacheStats.RowsCounted,
+				"cache_hit_rate_rows_total":   cacheStats.RowsTotal,
 			}
 
 			report := map[string]any{
-				"mode":             mode,
-				"paused":           paused == "true",
-				"total_stories":    len(all),
-				"by_status":        counts,
-				"batches":          batchSummary,
+				"mode":                  mode,
+				"paused":                paused == "true",
+				"total_stories":         len(all),
+				"by_status":             counts,
+				"batches":               batchSummary,
 				"unresolved_checkpoint": unresolved,
-				"tokens":           tokenBreakdown,
+				"tokens":                tokenBreakdown,
 			}
 			if jsonOutput {
 				return emitJSONStdout(commandPathSansRoot(c), nil, report, nil)
@@ -340,14 +354,14 @@ func newSprintStatusCmd() *cobra.Command {
 			if raw {
 				return json.NewEncoder(os.Stdout).Encode(report)
 			}
-			return printSprintTable(report, counts, batchSummary, tokens)
+			return printSprintTable(report, counts, batchSummary, tokens, cacheStats)
 		},
 	}
 	cmd.Flags().BoolVar(&raw, "raw", false, "emit raw JSON")
 	return cmd
 }
 
-func printSprintTable(report map[string]any, counts, batches map[string]int, tokens state.TokenCounts) error {
+func printSprintTable(report map[string]any, counts, batches map[string]int, tokens state.TokenCounts, cacheStats sqlite.CacheHitRateStats) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(w, "mode\t%v\n", report["mode"])
 	fmt.Fprintf(w, "paused\t%v\n", report["paused"])
@@ -369,7 +383,15 @@ func printSprintTable(report map[string]any, counts, batches map[string]int, tok
 	fmt.Fprintf(w, "  cache read\t%d\n", tokens.CacheRead)
 	fmt.Fprintf(w, "  cache create\t%d\n", tokens.CacheCreate)
 	fmt.Fprintf(w, "  total\t%d\n", tokens.Input+tokens.Output+tokens.CacheRead+tokens.CacheCreate)
-	fmt.Fprintf(w, "  cache hit rate\t%.1f%%\n", cacheHitRate(tokens))
+	// Issue #42 (Path 3): render "unknown (issue #42)" instead of "0%" when all
+	// TOKEN_BREAKDOWN rows are all-zero (L3 agents can't introspect their usage).
+	if cacheStats.Unknown {
+		fmt.Fprintf(w, "  cache hit rate\tunknown (issue #42) — %d/%d rows have breakdown data\n",
+			cacheStats.RowsCounted, cacheStats.RowsTotal)
+	} else {
+		fmt.Fprintf(w, "  cache hit rate\t%.1f%% (%d/%d rows)\n",
+			cacheStats.RatePercent, cacheStats.RowsCounted, cacheStats.RowsTotal)
+	}
 	if cp, ok := report["unresolved_checkpoint"].(*state.Checkpoint); ok && cp != nil {
 		fmt.Fprintln(w, "")
 		fmt.Fprintln(w, "UNRESOLVED CHECKPOINT — run `bmad sprint resume` after deciding")
