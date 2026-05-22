@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.3.0...v0.3.1) (2026-05-22)
+
+
+### Bug Fixes
+
+* **sprint:** tolerate file-level top frontmatter + trailing hrules (closes [#58](https://github.com/sosalejandro/bmad-story-runner-cli/issues/58)) ([#59](https://github.com/sosalejandro/bmad-story-runner-cli/issues/59)) ([17df3d1](https://github.com/sosalejandro/bmad-story-runner-cli/commit/17df3d1b6ac9eeb53038efd9e609c39c5b183157))
+
 ## [0.3.0](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.2.1...v0.3.0) (2026-05-22)
 
 
