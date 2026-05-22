@@ -131,6 +131,101 @@ depends_on: []
 	}
 }
 
+// TestParseEpicsFile_TolerateWorkflowFrontmatterAndTrailingHRules is a
+// regression test for issue #58 — v0.3.0's ParseEpicsFileFull rejected a real
+// 190-story epics.md file with:
+//
+//	yaml parse: yaml: line 4: did not find expected alphabetic or numeric character
+//
+// Two patterns must be tolerated:
+//
+//  1. **File-level top frontmatter** above the first `## Epic N` header. Some
+//     workflow tools (e.g. bmad-bmm) prepend a yaml block with metadata like
+//     `stepsCompleted`, `completedAt`, `inputDocuments`. Those keys don't
+//     correspond to EpicFrontmatter / StoryFrontmatter fields and may contain
+//     types (quoted dates, multi-line strings, nested lists) the typed structs
+//     would choke on. The parser must skip the block, not try to unmarshal it.
+//
+//  2. **Horizontal-rule `---` lines between sections inside the document body**
+//     (after a story's frontmatter has closed, e.g. before a trailing summary
+//     section). Each entity (epic / story) accepts AT MOST ONE frontmatter
+//     block — the one immediately following its header. Subsequent `---` lines
+//     are markdown horizontal rules and must not re-open another YAML buffer
+//     that greedily slurps body text into yaml.Unmarshal.
+//
+// Both shapes co-exist in the real nutrition-v2-go EDA cutover epics.md.
+func TestParseEpicsFile_TolerateWorkflowFrontmatterAndTrailingHRules(t *testing.T) {
+	t.Parallel()
+	path := writeEpics(t, `---
+stepsCompleted: [1, 2, 3, 4]
+status: 'complete'
+completedAt: '2026-05-16'
+inputDocuments:
+  - foo/architecture.md
+  - foo/decision-tree.md
+prdSubstitution: |
+  No formal PRD. This brownfield refactor uses the decision tree + audit as
+  PRD-equivalent inputs.
+project_name: 'demo (cutover)'
+---
+
+# demo — Epic Breakdown
+
+## Overview
+
+Some prose between the top frontmatter and the first epic header.
+
+## Epic 1: First Slice
+
+### Story 1.1: Hello World
+
+---
+story_id: "1.1"
+depends_on: []
+complexity: low
+---
+
+As a developer agent, I want a hello story, So that the parser is exercised.
+
+- **Given** the file
+- **When** the parser runs
+- **Then** the story is emitted
+
+---
+
+## Final Validation Summary
+
+**Status:** Complete.
+
+| Category    | Result            |
+| ----------- | ----------------- |
+| FR Coverage | All mapped        |
+| Story Count | 1 story / 1 epic  |
+
+**Total story count:** 1 story across 1 epic.
+`)
+	parsed, err := sprint.ParseEpicsFileFull(path)
+	if err != nil {
+		t.Fatalf("ParseEpicsFileFull rejected workflow-frontmatter + trailing HR: %v", err)
+	}
+	if len(parsed.Epics) != 1 {
+		t.Errorf("epics = %d, want 1", len(parsed.Epics))
+	}
+	if len(parsed.Stories) != 1 {
+		t.Fatalf("stories = %d, want 1", len(parsed.Stories))
+	}
+	if parsed.Stories[0].Frontmatter.StoryID != "1.1" {
+		t.Errorf("StoryID = %q, want 1.1", parsed.Stories[0].Frontmatter.StoryID)
+	}
+	if !parsed.Stories[0].HasFrontmatter {
+		t.Errorf("HasFrontmatter = false; want true (story 1.1 has a yaml block)")
+	}
+	if parsed.Stories[0].Frontmatter.Complexity != "low" {
+		t.Errorf("Complexity = %q, want low (frontmatter must still be parsed correctly)",
+			parsed.Stories[0].Frontmatter.Complexity)
+	}
+}
+
 func TestEpicIDFromStory(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct{ in, want string }{

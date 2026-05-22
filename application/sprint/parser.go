@@ -300,17 +300,31 @@ func ParseEpicsFileFull(path string) (ParsedEpicsFile, error) {
 		// a fresh `---` after `## Epic` (and BEFORE any `### Story`)
 		// belongs to the epic. A `---` after `### Story` belongs to the
 		// story.
+		//
+		// Each entity (epic / story) accepts AT MOST ONE frontmatter
+		// block — the one immediately following its header. Subsequent
+		// `---` lines inside the body are treated as markdown horizontal
+		// rules and ignored. This matches the documented grammar and
+		// prevents the parser from greedily slurping body content (e.g.
+		// trailing summary tables) into yaml.Unmarshal (issue #58).
+		// Same rule covers the file-level top frontmatter that some
+		// workflows emit above the first `## Epic N` header — it has no
+		// owner, so it falls through to the free-floating branch.
 		if strings.TrimSpace(line) == "---" {
 			if !inYAML {
-				// Entering YAML. Pick the owner based on document state.
-				if currentStory != nil {
+				// Entering YAML. Pick the owner based on document state,
+				// but only if that owner hasn't already consumed its one
+				// frontmatter block. A re-opener is a horizontal rule.
+				switch {
+				case currentStory != nil && !currentStory.HasFrontmatter:
 					yamlOwner = "story"
-				} else if currentEpic != nil {
+				case currentStory == nil && currentEpic != nil && !currentEpic.HasFrontmatter:
 					yamlOwner = "epic"
-				} else {
-					// Free-floating `---` before any header — treat as
-					// no-op (covers the markdown title-front-matter pattern
-					// some authors keep at the very top of the file).
+				default:
+					// Either no entity is open (free-floating `---`,
+					// covers the workflow-metadata frontmatter at the top
+					// of the file) or the open entity already has its
+					// frontmatter — treat as a horizontal rule, no-op.
 					continue
 				}
 				inYAML = true
