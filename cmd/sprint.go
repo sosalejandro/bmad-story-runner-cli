@@ -34,6 +34,7 @@ func newSprintCmd() *cobra.Command {
 		newSprintStatusCmd(),
 		newSprintCacheBundleCmd(),
 		newSprintInferDepsCmd(),
+		newSprintValidateDepsCmd(),
 	)
 	addV6PersistentFlags(cmd)
 	return cmd
