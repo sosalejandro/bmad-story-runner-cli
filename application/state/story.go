@@ -31,6 +31,20 @@ type NextAction struct {
 	Affects    []string `json:"affects"`
 }
 
+// NextOptions tunes the candidate sort used by NextWithOptions. Zero value
+// is the production default: scope-unfiltered, hydration-priority on.
+type NextOptions struct {
+	// Scope is the optional --scope <epic-id> per-call filter (issue #35).
+	// Empty = no filter.
+	Scope string
+	// NoHydrationPriority opts out of the issue-#49 hydration-priority
+	// bucket sort. When false (the default), candidates whose
+	// hydrated_file is non-nil drain first. When true, the legacy
+	// dep-order-only behaviour is restored — useful for the rare
+	// operator override "I explicitly want a fresh story now."
+	NoHydrationPriority bool
+}
+
 // Next returns up to max stories that are unblocked AND non-overlapping in
 // `affects` paths (file-overlap detection from §12 / sprint planning).
 //
@@ -57,7 +71,28 @@ func (s *StoryService) Next(ctx context.Context, max int) ([]NextAction, error) 
 // A scope that matches zero stories returns an empty batch (no error).
 // That mirrors the "nothing dispatchable right now" shape callers already
 // handle for the unscoped case.
+//
+// Equivalent to NextWithOptions(ctx, max, NextOptions{Scope: scope}).
 func (s *StoryService) NextWithScope(ctx context.Context, max int, scope string) ([]NextAction, error) {
+	return s.NextWithOptions(ctx, max, NextOptions{Scope: scope})
+}
+
+// NextWithOptions is the full-fidelity entry point. Scope filter is applied
+// to the candidate set BEFORE the hydration-priority sort, so a tightly
+// scoped call still drains hydrated-pending first within that scope.
+//
+// Hydration-priority sort (issue #49) reorders the candidates produced by
+// Stories.List (which already emits ORDER BY id, giving us the dep-order +
+// id-ordinal tiebreaker for free) into two buckets:
+//
+//  1. hydrated_file IS NOT NULL AND status = pending  (drain first)
+//  2. everything else                                 (fresh)
+//
+// The partition is stable, so within each bucket the existing dep-order +
+// id-ordinal sort is preserved. The reaper that runs in `cmd/story.go`
+// before NextWithOptions is invoked is unaffected — this method touches
+// the in-memory candidate slice only, never claim metadata or status.
+func (s *StoryService) NextWithOptions(ctx context.Context, max int, opts NextOptions) ([]NextAction, error) {
 	if max <= 0 {
 		max = s.effectiveMaxParallel(ctx)
 	}
@@ -66,6 +101,10 @@ func (s *StoryService) NextWithScope(ctx context.Context, max int, scope string)
 	candidates, err := s.Stories.List(ctx, state.StoryFilter{Status: &pending})
 	if err != nil {
 		return nil, fmt.Errorf("story next list pending: %w", err)
+	}
+
+	if !opts.NoHydrationPriority {
+		candidates = sortHydrationPriority(candidates)
 	}
 
 	var out []NextAction
@@ -77,7 +116,7 @@ func (s *StoryService) NextWithScope(ctx context.Context, max int, scope string)
 		}
 		// --scope filter — apply BEFORE the (more expensive) deps + affects
 		// lookups so a tightly-scoped call short-circuits cleanly.
-		if !appsprint.StoryMatchesEpic(st.ID, scope) {
+		if !appsprint.StoryMatchesEpic(st.ID, opts.Scope) {
 			continue
 		}
 		ok, err := s.depsSatisfied(ctx, st.ID)
@@ -113,6 +152,31 @@ func (s *StoryService) NextWithScope(ctx context.Context, max int, scope string)
 		})
 	}
 	return out, nil
+}
+
+// sortHydrationPriority returns a new slice with hydrated-pending stories
+// emitted first (in their original relative order), then the rest. Stable
+// — preserves the dep-order + id-ordinal sort that Stories.List already
+// applies. Pure function, no I/O, easy to test in isolation.
+func sortHydrationPriority(in []state.Story) []state.Story {
+	if len(in) < 2 {
+		return in
+	}
+	out := make([]state.Story, 0, len(in))
+	// Pass 1: hydrated-pending bucket.
+	for _, st := range in {
+		if st.HydratedFile != nil && st.Status == state.StatusPending {
+			out = append(out, st)
+		}
+	}
+	// Pass 2: everything else, preserving order.
+	for _, st := range in {
+		if st.HydratedFile != nil && st.Status == state.StatusPending {
+			continue
+		}
+		out = append(out, st)
+	}
+	return out
 }
 
 func (s *StoryService) depsSatisfied(ctx context.Context, storyID string) (bool, error) {
