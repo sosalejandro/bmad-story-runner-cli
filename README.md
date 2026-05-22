@@ -22,7 +22,8 @@ bmad dispatch record ...           # §12.7 per-call token cost log
 bmad render <template>             # prompt template renderer
 
 bmad story    <status|hydrate|next|checkpoint|set-status|complete>
-bmad sprint   <plan|run|pause|resume|status>     # epics.md → batches → orchestration
+bmad sprint   <plan|run|pause|resume|status|validate-deps|infer-deps|cache-bundle>
+                                                  # epics.md → batches → orchestration
 bmad env      <up|down|status|cleanup-orphans>   # port pool + activity sweeper
 bmad worktree <create|destroy|list|prune>        # state tracking; git is caller's job
 bmad depguard <flip|status|history>              # per-rule warn↔error ratchet
