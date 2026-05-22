@@ -253,10 +253,11 @@ agent returns produces the same instruction.`,
 
 func newStoryNextCmd() *cobra.Command {
 	var (
-		max     int
-		claim   bool
-		claimer string
-		scope   string
+		max                 int
+		claim               bool
+		claimer             string
+		scope               string
+		noHydrationPriority bool
 	)
 	cmd := &cobra.Command{
 		Use:   "next",
@@ -280,7 +281,15 @@ candidate set to stories whose id matches the epic (e.g. --scope 2 →
 only 2.* stories; --scope 10 will NOT match 1.* — uses the same
 prefix+dot rule as ` + "`bmad sprint plan --scope`" + `). The filter is
 applied to candidates BEFORE pick, never mutates state, and an empty
-match returns an empty batch (exit 0), not an error.`,
+match returns an empty batch (exit 0), not an error.
+
+Hydration-priority sort (issue #49): by default, candidates whose
+hydrated_file is non-nil drain BEFORE fresh stories — preserving the
+~80-100k token hydrate cost across orchestrator session restarts
+(skill updates, sprint checkpoints, worktree restores). The
+dep-order + id-ordinal tiebreaker is preserved within each bucket.
+Pass --no-hydration-priority to revert to the legacy dep-order-only
+behaviour (the rare "I explicitly want fresh now" override).`,
 		RunE: func(c *cobra.Command, args []string) error {
 			ctx := context.Background()
 			svc, cleanup, err := openStoryService(ctx)
@@ -309,7 +318,10 @@ match returns an empty batch (exit 0), not an error.`,
 					id, ttl)
 			}
 
-			actions, err := svc.NextWithScope(ctx, max, scope)
+			actions, err := svc.NextWithOptions(ctx, max, appstate.NextOptions{
+				Scope:               scope,
+				NoHydrationPriority: noHydrationPriority,
+			})
 			if err != nil {
 				return err
 			}
@@ -375,6 +387,8 @@ match returns an empty batch (exit 0), not an error.`,
 	cmd.Flags().BoolVar(&claim, "claim", true, "atomically claim returned stories (set claimed_at + claimed_by)")
 	cmd.Flags().StringVar(&claimer, "claimer", "orchestrator", "claimed_by value (e.g. session id)")
 	cmd.Flags().StringVar(&scope, "scope", "", "restrict candidates to one epic id (e.g. 2 → only 2.* stories; empty = no filter)")
+	cmd.Flags().BoolVar(&noHydrationPriority, "no-hydration-priority", false,
+		"opt out of issue-#49 hydration-priority bucket sort (default: hydrated-pending stories drain first to avoid re-paying ~80-100k token hydrate cost on session restarts)")
 	return cmd
 }
 

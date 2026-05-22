@@ -175,6 +175,105 @@ func TestStoryNext_EmptyScopeEquivalentToNext(t *testing.T) {
 	}
 }
 
+// TestStoryNext_HydrationPriorityDrainsFirst — issue #49 AC #1, #3.
+// Mixed fixture: 2 fresh-pending + 2 hydrated-pending, max_parallel = 4.
+// Default sort must emit the two hydrated-pending rows FIRST (in their
+// natural id-ordinal order), then the two fresh rows. This prevents the
+// orchestrator from re-paying the hydrate token cost after a restart.
+func TestStoryNext_HydrationPriorityDrainsFirst(t *testing.T) {
+	t.Parallel()
+	svc, _ := newStoryService(t)
+	ctx := context.Background()
+
+	// Seed order is deliberately scrambled vs id-ordinal to prove the
+	// sort is driven by hydrated-file presence, not insertion order.
+	seed(t, svc, "1.1", state.StatusPending) // fresh
+	seed(t, svc, "1.3", state.StatusPending) // hydrated
+	seed(t, svc, "1.2", state.StatusPending) // fresh
+	seed(t, svc, "1.4", state.StatusPending) // hydrated
+	if err := svc.Stories.SetHydratedFile(ctx, "1.3", "stories/1.3.hydrated.md", false); err != nil {
+		t.Fatalf("SetHydratedFile 1.3: %v", err)
+	}
+	if err := svc.Stories.SetHydratedFile(ctx, "1.4", "stories/1.4.hydrated.md", false); err != nil {
+		t.Fatalf("SetHydratedFile 1.4: %v", err)
+	}
+
+	out, err := svc.Next(ctx, 4)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if len(out) != 4 {
+		t.Fatalf("Next len = %d, want 4", len(out))
+	}
+	gotIDs := []string{out[0].StoryID, out[1].StoryID, out[2].StoryID, out[3].StoryID}
+	wantIDs := []string{"1.3", "1.4", "1.1", "1.2"}
+	for i, want := range wantIDs {
+		if gotIDs[i] != want {
+			t.Fatalf("Next order = %v, want %v (hydrated-pending must drain first)", gotIDs, wantIDs)
+		}
+	}
+}
+
+// TestStoryNext_NoHydrationPriorityFlag — issue #49 AC #2. Passing
+// NoHydrationPriority=true must restore the legacy dep-order-only sort
+// (Stories.List ORDER BY id), i.e. 1.1 ahead of 1.3 even though 1.3 is
+// hydrated.
+func TestStoryNext_NoHydrationPriorityFlag(t *testing.T) {
+	t.Parallel()
+	svc, _ := newStoryService(t)
+	ctx := context.Background()
+
+	seed(t, svc, "1.1", state.StatusPending) // fresh
+	seed(t, svc, "1.3", state.StatusPending) // hydrated
+	seed(t, svc, "1.2", state.StatusPending) // fresh
+	if err := svc.Stories.SetHydratedFile(ctx, "1.3", "stories/1.3.hydrated.md", false); err != nil {
+		t.Fatalf("SetHydratedFile: %v", err)
+	}
+
+	out, err := svc.NextWithOptions(ctx, 3, appstate.NextOptions{NoHydrationPriority: true})
+	if err != nil {
+		t.Fatalf("NextWithOptions: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("len = %d, want 3", len(out))
+	}
+	wantIDs := []string{"1.1", "1.2", "1.3"}
+	for i, want := range wantIDs {
+		if out[i].StoryID != want {
+			t.Fatalf("NoHydrationPriority order = %+v, want %v (legacy dep-order)", out, wantIDs)
+		}
+	}
+}
+
+// TestStoryNext_HydrationPriorityRespectsDeps — issue #49 AC #4 (claim
+// atomicity is verified at the cmd layer + ClaimUnclaimedPending; here we
+// confirm the sort never widens the candidate set past the deps gate.
+// A hydrated-pending story whose dep is still pending must still be held
+// back — hydration-priority is a tiebreaker among UNBLOCKED candidates,
+// not a way to jump the queue.
+func TestStoryNext_HydrationPriorityRespectsDeps(t *testing.T) {
+	t.Parallel()
+	svc, _ := newStoryService(t)
+	ctx := context.Background()
+
+	seed(t, svc, "1.1", state.StatusPending) // fresh, no deps
+	seed(t, svc, "1.2", state.StatusPending) // hydrated, blocked on 1.1
+	if err := svc.Stories.SetHydratedFile(ctx, "1.2", "stories/1.2.hydrated.md", false); err != nil {
+		t.Fatalf("SetHydratedFile: %v", err)
+	}
+	_ = svc.Dependencies.Add(ctx, "1.2", "1.1")
+
+	out, err := svc.Next(ctx, 4)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	// 1.2 is hydrated but blocked → must NOT appear; 1.1 is the only
+	// eligible row.
+	if len(out) != 1 || out[0].StoryID != "1.1" {
+		t.Fatalf("Next = %+v, want [1.1] only (1.2 blocked by 1.1 even though hydrated)", out)
+	}
+}
+
 func TestNext_FileOverlapPreventsParallelism(t *testing.T) {
 	t.Parallel()
 	svc, _ := newStoryService(t)
