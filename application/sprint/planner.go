@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/sosalejandro/bmad-story-runner-cli/domain/state"
 )
@@ -25,27 +26,37 @@ type Planner struct {
 
 // IngestResult summarises a Plan call.
 type IngestResult struct {
-	StoriesInserted    int     `json:"stories_inserted"`
-	StoriesUpdated     int     `json:"stories_updated"`
-	DependenciesAdded  int     `json:"dependencies_added"`
+	StoriesInserted   int `json:"stories_inserted"`
+	StoriesUpdated    int `json:"stories_updated"`
+	DependenciesAdded int `json:"dependencies_added"`
 	// DependenciesCleared counts story_dependencies rows wiped by the
 	// idempotent re-ingest step (one count per story whose old edges were
 	// dropped before its current frontmatter was re-applied). Surfaces
 	// "11 stories had their deps relaxed and reset on this replan" so an
 	// operator can see what changed.
-	DependenciesCleared int     `json:"dependencies_cleared,omitempty"`
-	AffectsAdded       int     `json:"affects_added"`
+	DependenciesCleared int `json:"dependencies_cleared,omitempty"`
+	// SynthesizedDependenciesAdded counts edges added by the issue #46
+	// cross-epic resolver (i.e. `requires_epics:` / `requires_stories:`
+	// expansion) — DependenciesAdded covers them too, but operators
+	// running side-by-side migrations want to know how many edges came
+	// from the epic-level synthesis vs. story-level `depends_on:`.
+	SynthesizedDependenciesAdded int `json:"synthesized_dependencies_added,omitempty"`
+	AffectsAdded                 int `json:"affects_added"`
 	// AffectsCleared counts story_affects rows wiped during idempotent
 	// re-ingest (analogous to DependenciesCleared).
-	AffectsCleared     int     `json:"affects_cleared,omitempty"`
-	BatchesCreated     int     `json:"batches_created"`
-	BatchIDs           []int64 `json:"batch_ids"`
+	AffectsCleared int     `json:"affects_cleared,omitempty"`
+	BatchesCreated int     `json:"batches_created"`
+	BatchIDs       []int64 `json:"batch_ids"`
 	// Scope, when non-empty, is the epic-id filter that was applied. Stories
 	// outside this scope were skipped entirely.
-	Scope              string  `json:"scope,omitempty"`
+	Scope string `json:"scope,omitempty"`
 	// StoriesSkippedByScope counts how many parsed stories were excluded
 	// because they don't belong to the requested --scope.
 	StoriesSkippedByScope int `json:"stories_skipped_by_scope,omitempty"`
+	// Warnings surfaces non-fatal diagnostics from the issue #46 resolver
+	// (placeholder-linear-chain smell, references to non-existent epics,
+	// etc.). Empty when the plan was clean.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // CoverageReport summarises frontmatter coverage of a parsed epics set —
@@ -93,21 +104,91 @@ func FilterByScope(parsed []ParsedStory, epicID string) []ParsedStory {
 // Plan persists parsed stories + builds batches. Clears any existing planned
 // batches first (re-planning replaces the queue).
 //
+// Equivalent to PlanWithEpics(ctx, nil, parsed, maxParallel) — the legacy
+// entry point for callers that don't carry epic-header metadata. The CLI
+// (cmd/sprint.go) uses PlanWithEpics so the issue #46 cross-epic resolver
+// fires; this wrapper keeps the older test suite + downstream packages
+// working without churn.
+func (p *Planner) Plan(ctx context.Context, parsed []ParsedStory, maxParallel int) (*IngestResult, error) {
+	return p.PlanWithEpics(ctx, nil, parsed, maxParallel)
+}
+
+// PlanWithEpics is the issue #46 entry point: persists parsed stories +
+// builds batches, AND expands epic-level `requires_epics:` /
+// `requires_stories:` frontmatter into synthesized story-level edges
+// before topo sorting.
+//
 // Idempotency contract (issue #21 gap 1): for every story in the parsed
 // slice, the planner FIRST wipes its existing story_dependencies and
 // story_affects rows, then re-inserts whatever the current frontmatter
-// declares. This is what makes "operator relaxed depends_on: ["1.4"] → []
-// and re-ran sprint plan" actually free the story for dispatch — without
-// the wipe, the stale edge persists in SQLite and `bmad story next` keeps
-// seeing the unmet prerequisite. Stories ABSENT from `parsed` are left
-// alone (a scoped replan never touches out-of-scope rows).
-func (p *Planner) Plan(ctx context.Context, parsed []ParsedStory, maxParallel int) (*IngestResult, error) {
+// declares (PLUS the synthesized cross-epic edges). This is what makes
+// "operator relaxed depends_on: ["1.4"] → [] and re-ran sprint plan"
+// actually free the story for dispatch — without the wipe, the stale
+// edge persists in SQLite and `bmad story next` keeps seeing the unmet
+// prerequisite. Stories ABSENT from `parsed` are left alone (a scoped
+// replan never touches out-of-scope rows).
+//
+// Cycle detection: when `epics` declares a `requires_epics:` cycle (e.g.
+// A→B and B→A), the function returns a non-nil error WITHOUT touching
+// SQLite. Story-level cycles continue to be caught by the topo-sort
+// drain check in buildBatches.
+func (p *Planner) PlanWithEpics(ctx context.Context, epics []ParsedEpic, parsed []ParsedStory, maxParallel int) (*IngestResult, error) {
 	if maxParallel <= 0 {
 		maxParallel = 4
 	}
 	res := &IngestResult{}
 
-	for _, ps := range parsed {
+	// Up-front epic-cycle check — fail fast before any SQLite mutation
+	// (acceptance criterion #4). Story-level cycles surface in the
+	// topo-sort drain check below.
+	if cycle := DetectRequiresEpicsCycle(epics); len(cycle) > 0 {
+		return nil, fmt.Errorf("planner: requires_epics cycle detected: %s", strings.Join(cycle, " -> "))
+	}
+
+	// Synthesise cross-epic deps (issue #46). Pure function — works on a
+	// copy of the parsed stories so we can layer it onto each ps.DependsOn
+	// without mutating the caller's slice. Warnings flow back through the
+	// IngestResult so the CLI can print them after success.
+	synth := SynthesizeRequiresEpics(epics, parsed)
+	res.Warnings = append(res.Warnings, synth.Warnings...)
+	res.Warnings = append(res.Warnings, DetectLinearChainPlaceholderSmell(epics, parsed)...)
+
+	// Apply synthesised deps to a working copy so downstream batching
+	// sees the unified depends_on list. We don't mutate the caller's
+	// slice — keep the parser-side ParsedStory shape pristine for any
+	// other consumer of the same `parsed` value (e.g. JSON marshalling).
+	working := make([]ParsedStory, len(parsed))
+	copy(working, parsed)
+	for i := range working {
+		extra := synth.SynthesizedDeps[working[i].Frontmatter.StoryID]
+		if len(extra) == 0 {
+			continue
+		}
+		// Combine, de-dup against own deps. `additional` keeps only the
+		// NEW edges so we can count them honestly in the IngestResult.
+		seen := make(map[string]struct{}, len(working[i].Frontmatter.DependsOn))
+		for _, d := range working[i].Frontmatter.DependsOn {
+			seen[d] = struct{}{}
+		}
+		var additional []string
+		for _, e := range extra {
+			if _, ok := seen[e]; ok {
+				continue
+			}
+			seen[e] = struct{}{}
+			additional = append(additional, e)
+		}
+		if len(additional) == 0 {
+			continue
+		}
+		combined := make([]string, 0, len(working[i].Frontmatter.DependsOn)+len(additional))
+		combined = append(combined, working[i].Frontmatter.DependsOn...)
+		combined = append(combined, additional...)
+		working[i].Frontmatter.DependsOn = combined
+		res.SynthesizedDependenciesAdded += len(additional)
+	}
+
+	for _, ps := range working {
 		st := ps.ToStory()
 		if err := p.Stories.Insert(ctx, st); err != nil {
 			// Already exists → update fields except status (preserve runtime progress).
@@ -178,7 +259,7 @@ func (p *Planner) Plan(ctx context.Context, parsed []ParsedStory, maxParallel in
 	if err := p.Batches.ClearPlan(ctx); err != nil {
 		return nil, fmt.Errorf("planner clear: %w", err)
 	}
-	batches, err := p.buildBatches(ctx, parsed, maxParallel)
+	batches, err := p.buildBatches(ctx, working, maxParallel)
 	if err != nil {
 		return nil, err
 	}

@@ -84,10 +84,12 @@ Safety rails (issue #14):
 				}
 				epicsPath = filepath.Join(docs, "epics.md")
 			}
-			parsed, err := appsprint.ParseEpicsFile(epicsPath)
+			parsedFull, err := appsprint.ParseEpicsFileFull(epicsPath)
 			if err != nil {
 				return err
 			}
+			parsed := parsedFull.Stories
+			epics := parsedFull.Epics
 
 			// Apply --scope filter FIRST so coverage analysis only flags
 			// in-scope stories. A scope restricted to a fully-annotated
@@ -98,6 +100,18 @@ Safety rails (issue #14):
 				if len(parsed) == 0 {
 					return fmt.Errorf("sprint plan: --scope %q matched zero stories in %s", scope, epicsPath)
 				}
+				// Same idea for the epic-level headers: when planning a single
+				// epic, the cross-epic resolver should only see THAT epic's
+				// requires_epics frontmatter (otherwise out-of-scope synthesis
+				// would fan out into rows we're not touching). Restrict to the
+				// requested scope.
+				filteredEpics := make([]appsprint.ParsedEpic, 0, len(epics))
+				for _, e := range epics {
+					if e.EpicID == scope {
+						filteredEpics = append(filteredEpics, e)
+					}
+				}
+				epics = filteredEpics
 			}
 
 			// Partial-coverage safety check (issue #14, fix #1).
@@ -136,13 +150,20 @@ Safety rails (issue #14):
 				Affects:      sqlite.NewStoryAffectsStore(db),
 				Batches:      sqlite.NewBatchesStore(db),
 			}
-			res, err := planner.Plan(ctx, parsed, maxP)
+			res, err := planner.PlanWithEpics(ctx, epics, parsed, maxP)
 			if err != nil {
 				return err
 			}
 			if scope != "" {
 				res.Scope = scope
 				res.StoriesSkippedByScope = totalBeforeScope - len(parsed)
+			}
+			// Surface planner-level warnings (issue #46: placeholder
+			// linear-chain smell, missing referenced epics) to stderr
+			// regardless of --json — the operator wants to see them
+			// before deciding to dispatch.
+			for _, w := range res.Warnings {
+				fmt.Fprintln(os.Stderr, "warn:", w)
 			}
 			if jsonOutput {
 				args := map[string]any{}
