@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.0](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.2.1...v0.3.0) (2026-05-22)
+
+
+### Features
+
+* **sprint:** `bmad sprint graph` — DOT/mermaid/json DAG visualisation (closes [#47](https://github.com/sosalejandro/bmad-story-runner-cli/issues/47)) ([#53](https://github.com/sosalejandro/bmad-story-runner-cli/issues/53)) ([c719cac](https://github.com/sosalejandro/bmad-story-runner-cli/commit/c719caca02312a27e62303172042a86a2ac4d713))
+* **sprint:** epic-level requires_epics + DAG resolver (closes [#46](https://github.com/sosalejandro/bmad-story-runner-cli/issues/46)) ([#50](https://github.com/sosalejandro/bmad-story-runner-cli/issues/50)) ([59138fd](https://github.com/sosalejandro/bmad-story-runner-cli/commit/59138fd18595e0f0176fcd5825c7597690635256))
+* **sprint:** validate-deps — cycle + orphan + missing-dep detection (closes [#48](https://github.com/sosalejandro/bmad-story-runner-cli/issues/48)) ([#51](https://github.com/sosalejandro/bmad-story-runner-cli/issues/51)) ([71a99c5](https://github.com/sosalejandro/bmad-story-runner-cli/commit/71a99c5ed54f6d02ba9b30c4cf170ec8974b194f))
+* **state:** hydration-priority sort in `story next` (closes [#49](https://github.com/sosalejandro/bmad-story-runner-cli/issues/49)) ([#52](https://github.com/sosalejandro/bmad-story-runner-cli/issues/52)) ([bd81607](https://github.com/sosalejandro/bmad-story-runner-cli/commit/bd81607c895dac00bf05f7ad5875f98ca4bab155))
+
+
+### Bug Fixes
+
+* **#42:** treat all-zero TOKEN_BREAKDOWN as "unknown", not 0% cache ([#43](https://github.com/sosalejandro/bmad-story-runner-cli/issues/43)) ([8129b89](https://github.com/sosalejandro/bmad-story-runner-cli/commit/8129b89a0bd6982acb716c8e14e7fbca1e466ad2))
+
 ## [0.2.1](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.2.0...v0.2.1) (2026-05-19)
 
 
