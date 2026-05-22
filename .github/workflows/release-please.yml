@@ -8,8 +8,153 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      pr: ${{ steps.release.outputs.pr }}
+      version: ${{ steps.release.outputs.version }}
+      release_created: ${{ steps.release.outputs.release_created }}
     steps:
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           target-branch: main
           release-type: go
+
+  stamp-release-pr:
+    # Bake the literal Version / CommitSHA / BuildDate into cmd/version.go on
+    # the release-please PR branch BEFORE it merges. Once merged + tagged,
+    # `go install module@vX.Y.Z` pulls source with the constants set, so the
+    # ldflags-priority path in resolveVersionFields() returns real values
+    # without needing a downloaded binary. See issue #56.
+    #
+    # SECURITY: All inputs flow from the trusted release-please action's
+    # outputs (the only "untrusted" thing in the PR JSON is the headBranchName
+    # which release-please itself authored). Even so, every interpolated
+    # value is passed via env: and dereferenced as "$VAR" inside run: blocks,
+    # not splatted into the script body — see the GitHub Actions injection
+    # hardening guide.
+    needs: release-please
+    if: needs.release-please.outputs.pr != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: derive release metadata
+        id: meta
+        env:
+          PR_JSON: ${{ needs.release-please.outputs.pr }}
+          FALLBACK_VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          set -euo pipefail
+          BRANCH="$(printf '%s' "$PR_JSON" | jq -r '.headBranchName // empty')"
+          VERSION="$(printf '%s' "$PR_JSON" | jq -r '.version // empty')"
+          if [ -z "$BRANCH" ]; then
+            echo "release-please pr output missing headBranchName" >&2
+            exit 1
+          fi
+          if [ -z "$VERSION" ]; then
+            VERSION="$FALLBACK_VERSION"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "release-please did not expose a version; aborting stamp" >&2
+            exit 1
+          fi
+          # Defensive: branch name + version both come from release-please,
+          # but we still validate shape before letting them touch the shell
+          # (belt-and-braces against a future release-please bug).
+          case "$BRANCH" in
+            release-please--*) ;;
+            *)
+              echo "unexpected release-please branch name: $BRANCH" >&2
+              exit 1
+              ;;
+          esac
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "unexpected version shape: $VERSION" >&2
+              exit 1
+              ;;
+          esac
+          echo "branch=$BRANCH" >>"$GITHUB_OUTPUT"
+          echo "version=$VERSION" >>"$GITHUB_OUTPUT"
+
+      - name: checkout release-please branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.branch }}
+          # Need the full history so HEAD~0 here equals the release-please
+          # auto-commit and HEAD~1 is the last real change being shipped.
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: stamp cmd/version.go
+        id: stamp
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          # CommitSHA = HEAD~1 of the release branch — i.e. the commit that
+          # release-please built its CHANGELOG/manifest commit on top of.
+          # That's the last "real" change going out in this release. Once
+          # the PR merges + the tag cuts, this SHA is what users will see
+          # as the canonical "what's in this release" pointer.
+          COMMIT="$(git rev-parse --short HEAD~1)"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          echo "stamping: version=v${VERSION} commit=${COMMIT} date=${DATE}"
+
+          # Idempotent in-place edit driven by Python so we don't have to
+          # ship-quote backslashes through sed. Only flips the literal
+          # placeholders ("dev" / "unknown") so a re-run after release-please
+          # force-pushes the PR branch (e.g. additional commits land on main)
+          # still stamps correctly without double-rewriting.
+          python3 - "$VERSION" "$COMMIT" "$DATE" <<'PY'
+          import pathlib, re, sys
+
+          version, commit, date = sys.argv[1], sys.argv[2], sys.argv[3]
+          path = pathlib.Path("cmd/version.go")
+          src = path.read_text()
+
+          replacements = [
+              (r'(\bVersion\s*=\s*)"dev"',       f'\\1"v{version}"'),
+              (r'(\bCommitSHA\s*=\s*)"unknown"', f'\\1"{commit}"'),
+              (r'(\bBuildDate\s*=\s*)"unknown"', f'\\1"{date}"'),
+          ]
+
+          new = src
+          for pat, repl in replacements:
+              new = re.sub(pat, repl, new, count=1)
+
+          if new != src:
+              path.write_text(new)
+          else:
+              print("no placeholders matched — already stamped or shape changed", file=sys.stderr)
+          PY
+
+          echo "commit=${COMMIT}" >>"$GITHUB_OUTPUT"
+          echo "date=${DATE}" >>"$GITHUB_OUTPUT"
+
+      - name: commit + push stamps
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          COMMIT: ${{ steps.stamp.outputs.commit }}
+          DATE: ${{ steps.stamp.outputs.date }}
+          BRANCH: ${{ steps.meta.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+          if git diff --quiet cmd/version.go; then
+            echo "no changes to cmd/version.go — already stamped, skipping"
+            exit 0
+          fi
+
+          git add cmd/version.go
+          git commit -m "chore(release): stamp build metadata for v${VERSION}
+
+          version=v${VERSION}
+          commit=${COMMIT}
+          date=${DATE}"
+          git push origin "HEAD:${BRANCH}"
