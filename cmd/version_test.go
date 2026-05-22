@@ -125,6 +125,36 @@ func TestShortSHA(t *testing.T) {
 	}
 }
 
+func TestVersionString_StampedReleaseValuesAreVerbatim(t *testing.T) {
+	// Models the post-release-please-stamp state: the workflow has rewritten
+	// the package-level defaults inside cmd/version.go to literal release
+	// values, so a `go install module@vX.Y.Z` build sees Version/CommitSHA/
+	// BuildDate already populated at the package level (no -X needed).
+	//
+	// Contract: when all three fields are non-default + non-empty, the
+	// BuildInfo fallback MUST NOT fire. This is the load-bearing test for
+	// issue #56 — if it regresses, `bmad --version` from a `go install`
+	// silently falls back to BuildInfo and the stamp work is wasted.
+	withVersionVars(t, "v0.4.0", "a1b2c3d", "2026-05-22T13:00:36Z")
+
+	version, commit, date := resolveVersionFields()
+
+	if version != "v0.4.0" {
+		t.Errorf("stamped Version = %q, want %q (BuildInfo must not override)", version, "v0.4.0")
+	}
+	if commit != "a1b2c3d" {
+		t.Errorf("stamped CommitSHA = %q, want %q (BuildInfo must not override)", commit, "a1b2c3d")
+	}
+	if date != "2026-05-22T13:00:36Z" {
+		t.Errorf("stamped BuildDate = %q, want %q (BuildInfo must not override)", date, "2026-05-22T13:00:36Z")
+	}
+
+	want := "v0.4.0 (commit a1b2c3d, built 2026-05-22T13:00:36Z)"
+	if got := VersionString(); got != want {
+		t.Errorf("VersionString() = %q, want %q", got, want)
+	}
+}
+
 func TestVersionString_PartialLdflagsStillUsesBuildInfoForRest(t *testing.T) {
 	// A partial stamp — only Version overridden — should still pull
 	// commit + date from BuildInfo when they're at defaults. This is
