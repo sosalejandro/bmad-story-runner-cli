@@ -39,29 +39,29 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: derive release metadata
+      - name: derive release branch
         id: meta
         env:
           PR_JSON: ${{ needs.release-please.outputs.pr }}
-          FALLBACK_VERSION: ${{ needs.release-please.outputs.version }}
         run: |
           set -euo pipefail
+          # The release-please-action v4 `pr` output is a JSON blob describing
+          # the just-opened/updated release PR. It exposes `headBranchName`
+          # but NOT a top-level `.version` field (see issue #64) — the version
+          # is only available in the PR title/body or, authoritatively, in
+          # `.release-please-manifest.json` on the release branch itself.
+          # The action's `outputs.version` is likewise empty at PR-open time
+          # (only populated AFTER the release is cut). So this step extracts
+          # just the branch; the version is read post-checkout from the
+          # manifest, which is the single source of truth.
           BRANCH="$(printf '%s' "$PR_JSON" | jq -r '.headBranchName // empty')"
-          VERSION="$(printf '%s' "$PR_JSON" | jq -r '.version // empty')"
           if [ -z "$BRANCH" ]; then
             echo "release-please pr output missing headBranchName" >&2
             exit 1
           fi
-          if [ -z "$VERSION" ]; then
-            VERSION="$FALLBACK_VERSION"
-          fi
-          if [ -z "$VERSION" ]; then
-            echo "release-please did not expose a version; aborting stamp" >&2
-            exit 1
-          fi
-          # Defensive: branch name + version both come from release-please,
-          # but we still validate shape before letting them touch the shell
-          # (belt-and-braces against a future release-please bug).
+          # Defensive: branch name comes from release-please, but we still
+          # validate shape before letting it touch the shell (belt-and-braces
+          # against a future release-please bug or a malformed PR payload).
           case "$BRANCH" in
             release-please--*) ;;
             *)
@@ -69,15 +69,7 @@ jobs:
               exit 1
               ;;
           esac
-          case "$VERSION" in
-            [0-9]*.[0-9]*.[0-9]*) ;;
-            *)
-              echo "unexpected version shape: $VERSION" >&2
-              exit 1
-              ;;
-          esac
           echo "branch=$BRANCH" >>"$GITHUB_OUTPUT"
-          echo "version=$VERSION" >>"$GITHUB_OUTPUT"
 
       - name: checkout release-please branch
         uses: actions/checkout@v4
@@ -88,10 +80,37 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: read version from release-please manifest
+        id: version
+        run: |
+          set -euo pipefail
+          # `.release-please-manifest.json` is the single source of truth for
+          # the next-release version number — release-please refreshes it on
+          # every PR open/force-push, so it always matches the PR title/body
+          # and the upcoming tag. Reading it here (post-checkout) sidesteps
+          # the broken `pr.version` / `outputs.version` paths flagged in #64.
+          if [ ! -f .release-please-manifest.json ]; then
+            echo "release-please manifest missing on branch" >&2
+            exit 1
+          fi
+          VERSION="$(jq -r '."."' .release-please-manifest.json)"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "release-please manifest has no '.' entry" >&2
+            exit 1
+          fi
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "manifest version has unexpected shape: $VERSION" >&2
+              exit 1
+              ;;
+          esac
+          echo "version=$VERSION" >>"$GITHUB_OUTPUT"
+
       - name: stamp cmd/version.go
         id: stamp
         env:
-          VERSION: ${{ steps.meta.outputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           # CommitSHA = HEAD~1 of the release branch — i.e. the commit that
@@ -104,11 +123,15 @@ jobs:
 
           echo "stamping: version=v${VERSION} commit=${COMMIT} date=${DATE}"
 
-          # Idempotent in-place edit driven by Python so we don't have to
-          # ship-quote backslashes through sed. Only flips the literal
-          # placeholders ("dev" / "unknown") so a re-run after release-please
-          # force-pushes the PR branch (e.g. additional commits land on main)
-          # still stamps correctly without double-rewriting.
+          # In-place edit driven by Python so we don't have to ship-quote
+          # backslashes through sed. The regexes match ANY current literal
+          # (the original "dev"/"unknown" placeholders on a first-ever stamp,
+          # or the prior release's stamped values on subsequent releases) and
+          # rewrite to the values for this release. This is critical: each
+          # release-please PR branches off `main`, so on the 2nd+ release
+          # cmd/version.go already contains the PREVIOUS release's stamps,
+          # not the original placeholders. A placeholder-only regex (the
+          # earlier impl) silently no-op'd in that case.
           python3 - "$VERSION" "$COMMIT" "$DATE" <<'PY'
           import pathlib, re, sys
 
@@ -116,20 +139,32 @@ jobs:
           path = pathlib.Path("cmd/version.go")
           src = path.read_text()
 
+          # Group 1 = the `<Name> = ` var-decl prefix.
+          # Group 2 = the CURRENT quoted literal (any value).
+          # We rewrite group 2 to the new literal, preserving formatting.
           replacements = [
-              (r'(\bVersion\s*=\s*)"dev"',       f'\\1"v{version}"'),
-              (r'(\bCommitSHA\s*=\s*)"unknown"', f'\\1"{commit}"'),
-              (r'(\bBuildDate\s*=\s*)"unknown"', f'\\1"{date}"'),
+              (r'(\bVersion\s*=\s*)"([^"]*)"',   f'\\1"v{version}"'),
+              (r'(\bCommitSHA\s*=\s*)"([^"]*)"', f'\\1"{commit}"'),
+              (r'(\bBuildDate\s*=\s*)"([^"]*)"', f'\\1"{date}"'),
           ]
 
           new = src
           for pat, repl in replacements:
-              new = re.sub(pat, repl, new, count=1)
+              new, n = re.subn(pat, repl, new, count=1)
+              if n != 1:
+                  print(f"pattern did not match exactly once: {pat}", file=sys.stderr)
+                  sys.exit(1)
 
-          if new != src:
-              path.write_text(new)
+          if new == src:
+              # All three patterns matched but produced identical text —
+              # i.e. the file already has the exact values for this release
+              # (possible if the workflow re-runs after a release-please
+              # force-push that didn't bump the version, e.g. a changelog
+              # touch-up). Safe no-op; `git diff --quiet` in the commit step
+              # detects this and skips the push.
+              print("file already has target stamps; nothing to write")
           else:
-              print("no placeholders matched — already stamped or shape changed", file=sys.stderr)
+              path.write_text(new)
           PY
 
           echo "commit=${COMMIT}" >>"$GITHUB_OUTPUT"
@@ -137,7 +172,7 @@ jobs:
 
       - name: commit + push stamps
         env:
-          VERSION: ${{ steps.meta.outputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
           COMMIT: ${{ steps.stamp.outputs.commit }}
           DATE: ${{ steps.stamp.outputs.date }}
           BRANCH: ${{ steps.meta.outputs.branch }}
