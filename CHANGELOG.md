@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.4.2...v0.5.0) (2026-05-23)
+
+
+### Features
+
+* **sprint:** tag story_dependencies edges with edge_kind discriminator (closes [#54](https://github.com/sosalejandro/bmad-story-runner-cli/issues/54)) ([#69](https://github.com/sosalejandro/bmad-story-runner-cli/issues/69)) ([6190911](https://github.com/sosalejandro/bmad-story-runner-cli/commit/6190911460787cd8baa97df53bf66107142d4365))
+
 ## [0.4.2](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.4.1...v0.4.2) (2026-05-23)
 
 
