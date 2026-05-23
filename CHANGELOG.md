@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.3.1...v0.4.0) (2026-05-23)
+
+
+### Features
+
+* **install:** embed agents + orchestrator skill + bmad install command (closes [#61](https://github.com/sosalejandro/bmad-story-runner-cli/issues/61)) ([#62](https://github.com/sosalejandro/bmad-story-runner-cli/issues/62)) ([d89c907](https://github.com/sosalejandro/bmad-story-runner-cli/commit/d89c90701cc6c0982a1cc17d4e4e8697ef170eeb))
+
 ## [0.3.1](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.3.0...v0.3.1) (2026-05-22)
 
 
