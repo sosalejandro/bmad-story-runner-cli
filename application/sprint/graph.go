@@ -41,9 +41,26 @@ const (
 	// EdgeKindDepends is a story-level depends_on edge — solid line.
 	EdgeKindDepends EdgeKind = "depends_on"
 	// EdgeKindEpicSynth is an epic-level requires_epics edge synthesised by
-	// the epic-DAG resolver (issue #46) — dashed line.
+	// the epic-DAG resolver (issue #46) — dashed line. As of issue #54 it
+	// also covers requires_stories synthesis, because both share the
+	// "epic-level, not story-author intent" semantic that justifies the
+	// dashed treatment.
 	EdgeKindEpicSynth EdgeKind = "epic_synth"
 )
+
+// edgeKindFromState maps a persistence-layer DependencyEdgeKind onto the
+// renderer-side EdgeKind. Synth kinds (epic_synth, epic_synth_stories) both
+// fold into EdgeKindEpicSynth — the renderer doesn't need to distinguish
+// them visually (both are dashed); a future "explicit synth" enrichment
+// can split them by extending this switch without touching the renderer.
+func edgeKindFromState(k state.DependencyEdgeKind) EdgeKind {
+	switch k {
+	case state.EdgeKindEpicSynth, state.EdgeKindEpicSynthStories:
+		return EdgeKindEpicSynth
+	default:
+		return EdgeKindDepends
+	}
+}
 
 // NodeKind classifies a graph node — story vs epic-summary cluster.
 type NodeKind string
@@ -126,24 +143,23 @@ func (b *GraphBuilder) Build(ctx context.Context, opts GraphBuilderOptions) (*Gr
 	}
 
 	// Collect every edge by iterating each story's depends_on list. We
-	// intentionally call .Of per story (not a single bulk read) because the
-	// port doesn't expose a bulk variant today, and 190 stories × 1 SELECT
-	// each on a local SQLite file is ~10ms in practice — well under the
-	// 500ms acceptance budget.
+	// intentionally call EdgesOf per story (not a single bulk read) because
+	// the port doesn't expose a bulk variant today, and 190 stories × 1
+	// SELECT each on a local SQLite file is ~10ms in practice — well under
+	// the 500ms acceptance budget. EdgesOf surfaces the persisted edge_kind
+	// (issue #54) so we can route epic-synth rows to the dashed renderer
+	// without re-deriving them at read time.
 	var rawEdges []Edge
 	for _, s := range all {
-		deps, err := b.Dependencies.Of(ctx, s.ID)
+		edges, err := b.Dependencies.EdgesOf(ctx, s.ID)
 		if err != nil {
 			return nil, fmt.Errorf("graph builder: deps for %q: %w", s.ID, err)
 		}
-		for _, dep := range deps {
+		for _, e := range edges {
 			rawEdges = append(rawEdges, Edge{
 				From: s.ID,
-				To:   dep,
-				// Currently all rows are story-level; epic-synth edges (issue
-				// #46) will tag themselves once the resolved-edges schema
-				// gains an edge_kind column.
-				Kind: EdgeKindDepends,
+				To:   e.DependsOnID,
+				Kind: edgeKindFromState(e.Kind),
 			})
 		}
 	}

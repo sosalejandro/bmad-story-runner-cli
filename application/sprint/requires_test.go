@@ -478,6 +478,44 @@ func TestPlanWithEpics_FourEpicSyntheticDAG(t *testing.T) {
 		}
 	}
 
+	// Issue #54 acceptance — edge_kind tagging. Every persisted row in
+	// this fixture is synth (the fixture has no story-level depends_on),
+	// and rows whose target appears in requires_stories: ["1.2"] for
+	// Epic 4 carry the more-specific 'epic_synth_stories' kind. Rows from
+	// requires_epics: get 'epic_synth'.
+	wantKinds := map[string]map[string]state.DependencyEdgeKind{
+		"2.1": {"1.3": state.EdgeKindEpicSynth},
+		"2.2": {"1.3": state.EdgeKindEpicSynth},
+		"3.1": {"1.3": state.EdgeKindEpicSynth},
+		"3.2": {"1.3": state.EdgeKindEpicSynth},
+		"4.1": {
+			"1.2": state.EdgeKindEpicSynthStories, // requires_stories
+			"2.2": state.EdgeKindEpicSynth,
+			"3.2": state.EdgeKindEpicSynth,
+		},
+		"4.2": {
+			"1.2": state.EdgeKindEpicSynthStories,
+			"2.2": state.EdgeKindEpicSynth,
+			"3.2": state.EdgeKindEpicSynth,
+		},
+	}
+	for sid, want := range wantKinds {
+		edges, err := depsStore.EdgesOf(ctx, sid)
+		if err != nil {
+			t.Fatalf("deps.EdgesOf %s: %v", sid, err)
+		}
+		got := make(map[string]state.DependencyEdgeKind, len(edges))
+		for _, e := range edges {
+			got[e.DependsOnID] = e.Kind
+		}
+		for dep, wantKind := range want {
+			if got[dep] != wantKind {
+				t.Errorf("edge_kind for %s→%s = %q, want %q (got map=%v)",
+					sid, dep, got[dep], wantKind, got)
+			}
+		}
+	}
+
 	// Batch plan must produce four topological layers (Epic 1, then 2+3
 	// parallel — but no batch can contain a story from Epic 4 alongside
 	// its prerequisites). Lower bound is 3 layers; max 4 because the
@@ -580,6 +618,167 @@ depends_on: ["1.1"]
 	if res.DependenciesAdded != 1 {
 		t.Errorf("DependenciesAdded = %d, want 1 (the explicit 1.2 → 1.1 edge)", res.DependenciesAdded)
 	}
+}
+
+// TestPlanWithEpics_MixedExplicitAndSynthEdgeKinds is the issue #54 headline
+// acceptance test: a fixture that mixes story-level explicit `depends_on`
+// declarations with epic-level synthesis MUST persist both, and the
+// edge_kind column MUST attribute each row to its source.
+//
+// Topology:
+//
+//	1.1, 1.2          — foundation, no deps
+//	2.1 depends_on 1.1 — story-author explicit
+//	2.2               — under Epic 2 which requires_epics: [1] (synthesised)
+//	3.1 depends_on 2.1 + Epic 3 requires_stories: ["1.2"]  → mixed kinds
+//
+// The persisted rows on 3.1 must split: 2.1 = explicit (author wrote it),
+// 1.2 = epic_synth_stories (planner synthesised from requires_stories).
+func TestPlanWithEpics_MixedExplicitAndSynthEdgeKinds(t *testing.T) {
+	t.Parallel()
+	db := openDB(t)
+	planner := &sprint.Planner{
+		Stories:      sqlite.NewStoriesStore(db),
+		Dependencies: sqlite.NewStoryDependenciesStore(db),
+		Affects:      sqlite.NewStoryAffectsStore(db),
+		Batches:      sqlite.NewBatchesStore(db),
+	}
+
+	path := writeFixture(t, "epics.md", `## Epic 1: Foundation
+
+### Story 1.1: Bootstrap
+---
+story_id: "1.1"
+---
+
+### Story 1.2: Helper
+---
+story_id: "1.2"
+---
+
+## Epic 2: Linear
+
+---
+epic_id: 2
+requires_epics: [1]
+---
+
+### Story 2.1: First of Epic 2
+---
+story_id: "2.1"
+depends_on: ["1.1"]
+---
+
+### Story 2.2: Last of Epic 2
+---
+story_id: "2.2"
+---
+
+## Epic 3: Mixed Kinds
+
+---
+epic_id: 3
+requires_stories: ["1.2"]
+---
+
+### Story 3.1: Mixed
+---
+story_id: "3.1"
+depends_on: ["2.1"]
+---
+`)
+	parsed, err := sprint.ParseEpicsFileFull(path)
+	if err != nil {
+		t.Fatalf("ParseEpicsFileFull: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := planner.PlanWithEpics(ctx, parsed.Epics, parsed.Stories, 10); err != nil {
+		t.Fatalf("PlanWithEpics: %v", err)
+	}
+
+	depsStore := sqlite.NewStoryDependenciesStore(db)
+
+	// Story 2.1: 1.1 is the author's explicit depends_on; 1.2 is the
+	// epic_synth (Epic 2 requires_epics: [1], so the LAST story of Epic 1
+	// = 1.2 gets synthesised on every story in Epic 2 that didn't already
+	// pin it). 2.1 still has 1.1 from depends_on plus 1.2 from synthesis
+	// — verify both rows + both kinds.
+	edges21, err := depsStore.EdgesOf(ctx, "2.1")
+	if err != nil {
+		t.Fatalf("EdgesOf 2.1: %v", err)
+	}
+	got21 := edgeMap(edges21)
+	if got21["1.1"] != state.EdgeKindExplicit {
+		t.Errorf("2.1 → 1.1 should be explicit (author depends_on), got %q (map=%v)",
+			got21["1.1"], got21)
+	}
+	if got21["1.2"] != state.EdgeKindEpicSynth {
+		t.Errorf("2.1 → 1.2 should be epic_synth (Epic 2 requires_epics: [1] last-of=1.2), got %q (map=%v)",
+			got21["1.2"], got21)
+	}
+
+	// Story 3.1: depends_on ["2.1"] = explicit; requires_stories: ["1.2"]
+	// at Epic 3 header → 1.2 = epic_synth_stories.
+	edges31, err := depsStore.EdgesOf(ctx, "3.1")
+	if err != nil {
+		t.Fatalf("EdgesOf 3.1: %v", err)
+	}
+	got31 := edgeMap(edges31)
+	if got31["2.1"] != state.EdgeKindExplicit {
+		t.Errorf("3.1 → 2.1 should be explicit, got %q (map=%v)", got31["2.1"], got31)
+	}
+	if got31["1.2"] != state.EdgeKindEpicSynthStories {
+		t.Errorf("3.1 → 1.2 should be epic_synth_stories, got %q (map=%v)", got31["1.2"], got31)
+	}
+
+	// QuerySyntheticEdges must surface only the synth rows (no explicit
+	// rows leak through — that's the basis of validate-deps suppression).
+	synth, err := sqlite.QuerySyntheticEdges(ctx, db)
+	if err != nil {
+		t.Fatalf("QuerySyntheticEdges: %v", err)
+	}
+	for _, e := range synth {
+		if e.Kind == state.EdgeKindExplicit {
+			t.Errorf("QuerySyntheticEdges leaked an explicit row: %+v", e)
+		}
+	}
+}
+
+// TestStoryDependencies_AddDefaultsToExplicit confirms the back-compat
+// contract — the pre-#54 Add entry point keeps writing the 'explicit'
+// kind so legacy callers never accidentally produce synth-tagged rows.
+func TestStoryDependencies_AddDefaultsToExplicit(t *testing.T) {
+	t.Parallel()
+	db := openDB(t)
+	stories := sqlite.NewStoriesStore(db)
+	ctx := context.Background()
+	for _, id := range []string{"a", "b"} {
+		if err := stories.Insert(ctx, state.Story{
+			ID: id, File: id, Title: id,
+			Status: state.StatusPending, Complexity: state.ComplexityMedium,
+		}); err != nil {
+			t.Fatalf("insert %q: %v", id, err)
+		}
+	}
+	deps := sqlite.NewStoryDependenciesStore(db)
+	if err := deps.Add(ctx, "a", "b"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	edges, _ := deps.EdgesOf(ctx, "a")
+	if len(edges) != 1 || edges[0].Kind != state.EdgeKindExplicit {
+		t.Fatalf("Add() default kind = %v, want exactly 1 row with %q",
+			edges, state.EdgeKindExplicit)
+	}
+}
+
+// edgeMap projects a slice of DependencyEdge into dep-id → kind for
+// terse map-comparison assertions in mixed-kind tests.
+func edgeMap(edges []state.DependencyEdge) map[string]state.DependencyEdgeKind {
+	out := make(map[string]state.DependencyEdgeKind, len(edges))
+	for _, e := range edges {
+		out[e.DependsOnID] = e.Kind
+	}
+	return out
 }
 
 // equalStringSlices: order-sensitive equality, since SynthesizeRequiresEpics

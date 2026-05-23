@@ -69,6 +69,30 @@ type ValidateReport struct {
 	TotalStories int `json:"total_stories"`
 }
 
+// SyntheticEdgeSet records edges the planner produced from epic-level
+// synthesis (issue #46 `requires_epics:` / `requires_stories:`) — keyed
+// by (story id, depends_on id) so a lookup is O(1). The validator's
+// placeholder-smell detector consults this to SUPPRESS warnings for
+// rows that came from epic-level intent rather than story-author
+// guesswork.
+//
+// The cobra wrapper populates this from the DB's `story_dependencies.
+// edge_kind` column post-#54 — the source of truth is now persistent
+// rather than re-derived from epic headers.
+type SyntheticEdgeSet map[string]map[string]bool
+
+// Has reports whether (storyID, depID) is a synthesised edge.
+func (s SyntheticEdgeSet) Has(storyID, depID string) bool {
+	if s == nil {
+		return false
+	}
+	deps, ok := s[storyID]
+	if !ok {
+		return false
+	}
+	return deps[depID]
+}
+
 // ValidateOptions parameterises a Validate call. Kept as a struct (not
 // positional args) so additive fields don't break callers.
 type ValidateOptions struct {
@@ -83,16 +107,17 @@ type ValidateOptions struct {
 	// errors so the caller exits non-zero. Other severities are unchanged.
 	Strict bool
 
-	// EpicRequires maps "epic id" → list of declared upstream epic ids
-	// it depends on (the future #46 `requires_epics:` field at the epic
-	// header). Used by the placeholder-smell detector to SUPPRESS the
-	// finding when "first story of Epic N depends_on last story of Epic
-	// N-1" matches an explicit `requires_epics: [N-1]` declaration.
+	// SyntheticEdges is the set of (story_id, dep_id) tuples that were
+	// produced by epic-level synthesis (issue #46) — the planner persists
+	// them with edge_kind = 'epic_synth' / 'epic_synth_stories'. The
+	// placeholder-smell detector treats any matching edge as legitimately
+	// epic-declared and suppresses the smell.
 	//
-	// Nil map = no declarations parsed; every "linear-chain" pattern
-	// will be flagged. Once #46 lands, the cobra wrapper populates this
-	// from epic-level frontmatter.
-	EpicRequires map[string][]string
+	// Nil = "no synthesis context available"; the detector falls back to
+	// flagging every linear-chain pattern (current behaviour for callers
+	// that don't have DB access). Issue #54 made this the canonical
+	// suppression source.
+	SyntheticEdges SyntheticEdgeSet
 }
 
 // Validate runs every detector over the parsed stories and returns a
@@ -123,7 +148,7 @@ func Validate(parsed []ParsedStory, opts ValidateOptions) ValidateReport {
 	findings = append(findings, detectMissingDeps(byID, order)...)
 	findings = append(findings, detectCycles(byID, order)...)
 	findings = append(findings, detectOrphans(byID, order)...)
-	findings = append(findings, detectPlaceholderSmell(byID, order, opts.EpicRequires)...)
+	findings = append(findings, detectPlaceholderSmell(byID, order, opts.SyntheticEdges)...)
 	findings = append(findings, detectDiamonds(byID, order)...)
 
 	// Deterministic ordering: kind alpha, then involved_ids[0] alpha.
@@ -469,16 +494,20 @@ func parseStoryNumber(s string) (int, bool) {
 // noise the operator can then clear, because the cost of a missed real
 // cross-epic dep is much higher than the cost of an extra INFO line.
 //
-// Suppression: when EpicRequires[N] contains "N-1", we skip the finding
-// (the operator has explicitly declared the cross-epic relationship at
-// the epic level, so the linear-chain frontmatter is intentional, not
-// a placeholder).
+// Suppression (post-#54): when the (story, dep) tuple is in syntheticEdges
+// — i.e. the planner persisted it as edge_kind != 'explicit' — we skip
+// the finding. The author has explicitly declared the cross-epic
+// relationship at the epic level, so the linear-chain SHAPE is
+// intentional, not a placeholder. This replaces the pre-#54 epic-id-keyed
+// EpicRequires map: we now suppress based on what the planner ACTUALLY
+// persisted, not on what the parser re-derived from the epic header.
 //
-// Defensive code path for #46: if EpicRequires is nil OR lacks an entry
-// for Epic N, we emit the finding. Once #46 lands and the cobra wrapper
-// populates the map from epic-level frontmatter, declarations will start
-// suppressing matches without any change to the detector.
-func detectPlaceholderSmell(byID map[string]ParsedStory, order []string, epicRequires map[string][]string) []Finding {
+// Backwards-compat: if syntheticEdges is nil (a caller that hasn't been
+// updated, or one running without DB access), every linear-chain pattern
+// gets the INFO finding — same conservative behaviour as before. The
+// suggested-fix text steers the operator at the docs that explain how
+// to declare requires_epics.
+func detectPlaceholderSmell(byID map[string]ParsedStory, order []string, syntheticEdges SyntheticEdgeSet) []Finding {
 	// Group ids by epic.
 	byEpic := make(map[string][]string)
 	for _, id := range order {
@@ -526,8 +555,10 @@ func detectPlaceholderSmell(byID map[string]ParsedStory, order []string, epicReq
 		if lastOfEpic[depEpic] != dep {
 			continue
 		}
-		// Suppression — explicit requires_epics declaration.
-		if declared := epicRequires[epic]; containsString(declared, depEpic) {
+		// Suppression — the planner persisted this edge as synthesised
+		// (issue #54), so it's an epic-level declaration rather than a
+		// story-author placeholder.
+		if syntheticEdges.Has(id, dep) {
 			continue
 		}
 		out = append(out, Finding{
@@ -556,15 +587,6 @@ func isPreviousEpicNumeric(epic, prevCandidate string) bool {
 		return false
 	}
 	return b == a-1
-}
-
-func containsString(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
 }
 
 // detectDiamonds flags ids that have ≥2 distinct dependency-paths

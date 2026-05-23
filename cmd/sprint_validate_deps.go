@@ -84,19 +84,22 @@ Exit codes (` + "`bmad doctor`" + ` shows the full contract):
 				return err
 			}
 
+			// Post-#54: consult the state DB for any edges the planner
+			// has already persisted as synthesised (edge_kind !=
+			// 'explicit'). Each such edge suppresses the placeholder-
+			// smell finding on the matching (story, dep) pair.
+			//
+			// Failure modes: when the DB isn't reachable (fresh repo
+			// pre-`bmad sprint plan`), or when no rows have been written
+			// yet, we proceed with a nil edge set — every linear-chain
+			// pattern still emits the INFO finding, same conservative
+			// behaviour as the pre-#54 nil EpicRequires path.
+			syntheticEdges := loadSyntheticEdges(ctx)
+
 			report := appsprint.Validate(parsed, appsprint.ValidateOptions{
-				Scope:  scope,
-				Strict: strict,
-				// EpicRequires intentionally nil for now — issue #46 will
-				// add epic-level frontmatter parsing. When it does, this
-				// is the single place to wire it in:
-				//
-				//   EpicRequires: appsprint.ParseEpicRequires(epicsPath),
-				//
-				// Until then, every "first-of-epic depends_on last-of-prev"
-				// match emits a placeholder_smell INFO finding (the
-				// suggestion text tells the operator how to fix it).
-				EpicRequires: nil,
+				Scope:          scope,
+				Strict:         strict,
+				SyntheticEdges: syntheticEdges,
 			})
 
 			if jsonOutput {
@@ -128,6 +131,42 @@ Exit codes (` + "`bmad doctor`" + ` shows the full contract):
 	cmd.Flags().StringVar(&scope, "scope", "", "restrict validation to one epic id (e.g. 4 → only 4.* stories)")
 	cmd.Flags().BoolVar(&strict, "strict", false, "escalate WARN findings (orphans) to errors for the exit-code decision")
 	return cmd
+}
+
+// loadSyntheticEdges queries the state DB for every story_dependencies row
+// whose edge_kind marks it as a synth product of issue #46 / #54 epic-
+// level resolution, and returns them shaped for the validator's
+// suppression lookup. Errors are swallowed deliberately — a fresh repo
+// without a DB on disk simply gets a nil set, the same defensive default
+// every other code path uses for "no DB context available".
+//
+// This is what makes `bmad sprint validate-deps` distinguish a story
+// author's depends_on placeholder from a planner-synthesised edge: the
+// DB is the single source of truth for that distinction, and the row
+// shape on disk is what we read here.
+func loadSyntheticEdges(ctx context.Context) appsprint.SyntheticEdgeSet {
+	db, err := openV6DB(ctx)
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	rows, err := sqlite.QuerySyntheticEdges(ctx, db)
+	if err != nil {
+		return nil
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make(appsprint.SyntheticEdgeSet, len(rows))
+	for _, r := range rows {
+		inner := out[r.StoryID]
+		if inner == nil {
+			inner = make(map[string]bool, 2)
+			out[r.StoryID] = inner
+		}
+		inner[r.DependsOnID] = true
+	}
+	return out
 }
 
 // emitValidateText renders a short human-readable summary. JSON callers

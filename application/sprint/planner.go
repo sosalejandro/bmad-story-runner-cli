@@ -157,27 +157,50 @@ func (p *Planner) PlanWithEpics(ctx context.Context, epics []ParsedEpic, parsed 
 	// sees the unified depends_on list. We don't mutate the caller's
 	// slice — keep the parser-side ParsedStory shape pristine for any
 	// other consumer of the same `parsed` value (e.g. JSON marshalling).
+	//
+	// We ALSO keep a per-story map of (dep id → synth kind) for the rows
+	// the synthesis produced — the persistence loop below consults it so
+	// each story_dependencies row gets the right edge_kind tag (issue #54).
 	working := make([]ParsedStory, len(parsed))
 	copy(working, parsed)
+	synthKindByStoryDep := make(map[string]map[string]state.DependencyEdgeKind, len(working))
 	for i := range working {
 		extra := synth.SynthesizedDeps[working[i].Frontmatter.StoryID]
+		extraKinds := synth.SynthesizedKinds[working[i].Frontmatter.StoryID]
 		if len(extra) == 0 {
 			continue
 		}
-		// Combine, de-dup against own deps. `additional` keeps only the
-		// NEW edges so we can count them honestly in the IngestResult.
-		seen := make(map[string]struct{}, len(working[i].Frontmatter.DependsOn))
+		// Track which of the synth targets are NEW (not already in the
+		// author's depends_on) so we can count them honestly in
+		// SynthesizedDependenciesAdded. But for edge_kind attribution we
+		// ALWAYS prefer the synthesised kind — when a story author wrote
+		// `depends_on: [X]` for a target that the resolver would have
+		// synthesised anyway, the synth kind carries strictly more
+		// semantic info (it records that an epic-level declaration
+		// validates this edge), which is what `bmad sprint validate-deps`
+		// uses to suppress the placeholder-smell finding. Treating the
+		// edge as synth in this case matches the issue #54 contract:
+		// "suppress smell-warning for any edge with edge_kind != explicit".
+		authorDeps := make(map[string]struct{}, len(working[i].Frontmatter.DependsOn))
 		for _, d := range working[i].Frontmatter.DependsOn {
-			seen[d] = struct{}{}
+			authorDeps[d] = struct{}{}
+		}
+		kindMap := synthKindByStoryDep[working[i].Frontmatter.StoryID]
+		if kindMap == nil {
+			kindMap = make(map[string]state.DependencyEdgeKind, len(extra))
 		}
 		var additional []string
-		for _, e := range extra {
-			if _, ok := seen[e]; ok {
-				continue
+		for j, e := range extra {
+			kindMap[e] = mapSynthKind(extraKinds[j])
+			if _, alreadyAuthor := authorDeps[e]; alreadyAuthor {
+				continue // not a NEW edge — author already declared it
 			}
-			seen[e] = struct{}{}
 			additional = append(additional, e)
 		}
+		// Always record the kindMap, even when every synth target was
+		// already in the author's depends_on — the persistence loop needs
+		// it to overwrite the default 'explicit' kind for those rows.
+		synthKindByStoryDep[working[i].Frontmatter.StoryID] = kindMap
 		if len(additional) == 0 {
 			continue
 		}
@@ -235,12 +258,20 @@ func (p *Planner) PlanWithEpics(ctx context.Context, epics []ParsedEpic, parsed 
 			res.AffectsCleared++
 		}
 
+		kindMap := synthKindByStoryDep[st.ID]
 		for _, dep := range ps.Frontmatter.DependsOn {
 			if dep == "" {
 				continue
 			}
-			if err := p.Dependencies.Add(ctx, st.ID, dep); err != nil {
-				return nil, fmt.Errorf("planner dep %q→%q: %w", st.ID, dep, err)
+			// kindMap only carries synthesised entries; an absent lookup
+			// means the dep is story-level explicit (the original
+			// frontmatter.depends_on contract).
+			kind := state.EdgeKindExplicit
+			if k, ok := kindMap[dep]; ok {
+				kind = k
+			}
+			if err := p.Dependencies.AddWithKind(ctx, st.ID, dep, kind); err != nil {
+				return nil, fmt.Errorf("planner dep %q→%q (%s): %w", st.ID, dep, kind, err)
 			}
 			res.DependenciesAdded++
 		}
@@ -339,6 +370,24 @@ func (p *Planner) buildBatches(ctx context.Context, parsed []ParsedStory, maxPar
 	}
 
 	return out, nil
+}
+
+// mapSynthKind converts the application-layer SynthEdgeKind (pure-function
+// shape) into the persistence-layer state.DependencyEdgeKind. Kept narrow:
+// only the two synthesised kinds map through here — explicit edges are
+// written directly with state.EdgeKindExplicit by the caller.
+func mapSynthKind(k SynthEdgeKind) state.DependencyEdgeKind {
+	switch k {
+	case SynthFromEpicRequires:
+		return state.EdgeKindEpicSynth
+	case SynthFromStoryRequires:
+		return state.EdgeKindEpicSynthStories
+	default:
+		// Defensive: an unknown synth kind defaults to the broader
+		// epic-synth bucket so the row is still marked synthesised (and
+		// therefore styled dashed + suppressed from placeholder-smell).
+		return state.EdgeKindEpicSynth
+	}
 }
 
 // buildLayer greedily fills one batch from the ready set, honoring:

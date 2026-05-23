@@ -190,12 +190,17 @@ func TestValidate_PlaceholderSmellSuppressedByRequiresEpics(t *testing.T) {
 		mkStory("2.1", "1.2"),
 		mkStory("2.2", "2.1"),
 	}
+	// Post-#54: suppression is driven by the (story, dep) edge having
+	// been persisted as synthesised. We feed that shape here directly so
+	// the test is independent of the planner.
 	rep := sprint.Validate(parsed, sprint.ValidateOptions{
-		EpicRequires: map[string][]string{"2": {"1"}},
+		SyntheticEdges: sprint.SyntheticEdgeSet{
+			"2.1": {"1.2": true},
+		},
 	})
 	kinds := findKinds(rep)
 	if kinds[sprint.FindingPlaceholderSmell] != 0 {
-		t.Fatalf("placeholder_smell should be suppressed by requires_epics, got %+v\n%+v",
+		t.Fatalf("placeholder_smell should be suppressed by synthesised edge, got %+v\n%+v",
 			kinds, rep.Findings)
 	}
 }

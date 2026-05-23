@@ -367,6 +367,95 @@ func TestRenderDOT_SubjectClippedAt30Chars(t *testing.T) {
 	}
 }
 
+// TestRenderDOT_SynthEdgesAreDashed — issue #54 acceptance criterion #3.
+// When the persisted edge_kind marks a row as epic_synth, the DOT renderer
+// MUST emit `style=dashed` on that edge while leaving explicit edges
+// unadorned. Mirrored by TestRenderMermaid_SynthEdgesUseDashedArrow below.
+func TestRenderDOT_SynthEdgesAreDashed(t *testing.T) {
+	t.Parallel()
+	db := openDB(t)
+	storiesStore := sqlite.NewStoriesStore(db)
+	depsStore := sqlite.NewStoryDependenciesStore(db)
+	ctx := context.Background()
+	now := time.Now()
+	for _, id := range []string{"1.1", "1.2", "2.1"} {
+		if err := storiesStore.Insert(ctx, state.Story{
+			ID: id, Title: "s " + id, Status: state.StatusPending,
+			Complexity: state.ComplexityMedium, StoryType: state.StoryTypeCode,
+			CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	// Mixed seed: 2.1 → 1.1 = explicit; 2.1 → 1.2 = epic_synth.
+	if err := depsStore.AddWithKind(ctx, "2.1", "1.1", state.EdgeKindExplicit); err != nil {
+		t.Fatalf("AddWithKind explicit: %v", err)
+	}
+	if err := depsStore.AddWithKind(ctx, "2.1", "1.2", state.EdgeKindEpicSynth); err != nil {
+		t.Fatalf("AddWithKind epic_synth: %v", err)
+	}
+
+	b := &sprint.GraphBuilder{Stories: storiesStore, Dependencies: depsStore}
+	g, err := b.Build(ctx, sprint.GraphBuilderOptions{IncludeCompleted: true})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	r := &sprint.DOTRenderer{WithStatus: false}
+	var buf bytes.Buffer
+	if err := r.Render(&buf, g); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := buf.String()
+	// epic_synth edge: dashed
+	if !strings.Contains(out, `"2.1" -> "1.2" [style=dashed]`) {
+		t.Errorf("expected dashed synth edge 2.1->1.2, got:\n%s", out)
+	}
+	// explicit edge: not dashed (the bare `... -> ...;` form)
+	if !strings.Contains(out, `"2.1" -> "1.1";`) {
+		t.Errorf("expected solid explicit edge 2.1->1.1, got:\n%s", out)
+	}
+	if strings.Contains(out, `"2.1" -> "1.1" [style=dashed]`) {
+		t.Errorf("explicit edge incorrectly rendered dashed:\n%s", out)
+	}
+}
+
+// TestRenderMermaid_SynthEdgesUseDashedArrow — same contract as the DOT
+// test but for Mermaid's `-.->` form.
+func TestRenderMermaid_SynthEdgesUseDashedArrow(t *testing.T) {
+	t.Parallel()
+	db := openDB(t)
+	storiesStore := sqlite.NewStoriesStore(db)
+	depsStore := sqlite.NewStoryDependenciesStore(db)
+	ctx := context.Background()
+	now := time.Now()
+	for _, id := range []string{"1.1", "1.2", "2.1"} {
+		if err := storiesStore.Insert(ctx, state.Story{
+			ID: id, Title: "s " + id, Status: state.StatusPending,
+			Complexity: state.ComplexityMedium, StoryType: state.StoryTypeCode,
+			CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	_ = depsStore.AddWithKind(ctx, "2.1", "1.1", state.EdgeKindExplicit)
+	_ = depsStore.AddWithKind(ctx, "2.1", "1.2", state.EdgeKindEpicSynthStories)
+
+	b := &sprint.GraphBuilder{Stories: storiesStore, Dependencies: depsStore}
+	g, _ := b.Build(ctx, sprint.GraphBuilderOptions{IncludeCompleted: true})
+	r := &sprint.MermaidRenderer{WithStatus: false}
+	var buf bytes.Buffer
+	if err := r.Render(&buf, g); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `s2_1 -.-> s1_2`) {
+		t.Errorf("expected dashed mermaid arrow s2_1 -.-> s1_2, got:\n%s", out)
+	}
+	if !strings.Contains(out, `s2_1 --> s1_1`) {
+		t.Errorf("expected solid mermaid arrow s2_1 --> s1_1, got:\n%s", out)
+	}
+}
+
 // ----------------------------------------------------------------------------
 // helpers
 // ----------------------------------------------------------------------------
