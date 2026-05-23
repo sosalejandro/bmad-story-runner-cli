@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.4.1...v0.4.2) (2026-05-23)
+
+
+### Bug Fixes
+
+* **sprint:** bump atlas to v0.3.0 to clear addambiguousedge panic (closes [#55](https://github.com/sosalejandro/bmad-story-runner-cli/issues/55)) ([#67](https://github.com/sosalejandro/bmad-story-runner-cli/issues/67)) ([86f5148](https://github.com/sosalejandro/bmad-story-runner-cli/commit/86f514821d4f1379a8f2f7867ad18cb1fdae1e48))
+
 ## [0.4.1](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.4.0...v0.4.1) (2026-05-23)
 
 
