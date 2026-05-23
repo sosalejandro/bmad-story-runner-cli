@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.1](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.4.0...v0.4.1) (2026-05-23)
+
+
+### Bug Fixes
+
+* **ci:** read release version from manifest, not release-please pr output (closes [#64](https://github.com/sosalejandro/bmad-story-runner-cli/issues/64)) ([#65](https://github.com/sosalejandro/bmad-story-runner-cli/issues/65)) ([ae1d418](https://github.com/sosalejandro/bmad-story-runner-cli/commit/ae1d418dbfe0ff84cbaea0edab9da6ec8d61252a))
+* drop the broken jq paths and read the version from ([ae1d418](https://github.com/sosalejandro/bmad-story-runner-cli/commit/ae1d418dbfe0ff84cbaea0edab9da6ec8d61252a))
+
 ## [0.4.0](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.3.1...v0.4.0) (2026-05-23)
 
 
