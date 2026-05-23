@@ -15,6 +15,7 @@ read-modify-write races. Commands are organized into verb-namespaced subtrees:
 
 ```
 bmad init                          # scaffold bmad-state.db + seed config
+bmad install [--target .claude/]   # drop embedded L3 agents + skills into .claude/
 bmad migrate --from <v4.json>      # one-shot V4 → V6 import (idempotent)
 bmad config <key> [<value>]        # runtime knobs (sqlite-backed)
 bmad system-check                  # free RAM + CPU load + max_safe_parallel
