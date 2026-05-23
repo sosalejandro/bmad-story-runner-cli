@@ -124,6 +124,93 @@ infrastructure/   Concrete adapters (filesystem, JSON, YAML, Markdown)
 cmd/              Cobra CLI — wires use cases, handles output
 ```
 
+
+## Dispatch model — L1 / L2 / L3
+
+Bmad's value comes from a three-tier dispatch architecture. Each tier has a single responsibility; together they let one Claude session drive an entire BMad sprint without inline shell or Python.
+
+```
+L1 — bmad-v6-orchestrator skill (Claude main session)
+       │  decides what's next, parses agent results, records telemetry
+       │
+       ▼
+L2 — bmad CLI (this binary; pure Go)
+       │  state mgmt + idempotency + template rendering + audit log
+       │  exposes typed exit codes (0/1/2/10/20/30/40/50)
+       │
+       ▼
+L3 — story-* / *-writer / *-implementer / *-reviewer agents
+       │  spawned via Claude's Agent tool with rendered prompts
+       │  one agent per stage (hydrate / atdd / implement / test-* / code-review / commit)
+```
+
+### L1 — the orchestrator skill (`bmad-v6-orchestrator`)
+
+The main Claude session embodies the skill. Its loop:
+
+1. `bmad system-check --reserve <ram>` — gate on free RAM
+2. `bmad story next --max-parallel N --claim` — atomically claim up to N candidate stories (hydration-priority sorted)
+3. **Dispatch in parallel** — one Claude message with N `Agent()` tool calls, each carrying a rendered prompt from L2
+4. **Wait for returns** — each L3 agent ends its response with `TOKEN_BREAKDOWN: input=N output=N cache_read=N cache_create=N`
+5. **Per return**:
+   - `bmad dispatch record --input-tokens N --output-tokens N --cache-read-tokens N --cache-create-tokens N` — persist the 4-field token breakdown (powers `cache_hit_rate`)
+   - `bmad set-status <id> <next_stage_or_complete>` — advance state
+   - `bmad env down <id>` if the story owned an env
+6. Goto 1
+
+The skill also invokes 7 helper skills at specific lifecycle points (not raw `bmad <cmd>` calls):
+
+| Lifecycle point | Helper skill(s) | What they wrap |
+|---|---|---|
+| Story-start env-up | `port-pool` → `docker-up` → `healthcheck` | Port allocation + docker-compose up + readiness poll |
+| Pre-loop sprint refresh | `sprint-planning` | `bmad sprint plan` (re-ingest epics.md when state stale) |
+| Post-completion gate | `context-propagation` → `story-checkpoint` | Surface downstream-affected stories; evaluate §12.5 dual-trigger checkpoint |
+| Session-exit / orphan cleanup | `sweeper` | Tear down idle test envs |
+
+A regression test in `assets/embed_test.go` fails the build if any helper skill becomes unreferenced — dead-skill regressions are blocked at CI.
+
+### L2 — bmad CLI
+
+The binary is pure Go with no dependencies on Claude APIs. Its commands are the only mutation surface for sprint state:
+
+- **State** — `bmad story next/claim/set-status/set-complete`; atomic claims via single SQLite transaction
+- **Idempotency** — `bmad dispatch begin/record` use idempotency keys so dispatch retries are no-ops
+- **Templates** — `bmad render <stage>` produces the prompt that L3 receives; templates live in `infrastructure/prompts/templates/`
+- **Audit** — every invocation logged to `~/.bmad/audit.jsonl`; queryable via `bmad log show/stats/patterns`
+- **Diagnostics** — `bmad doctor` env self-check, `bmad sprint graph` DAG viz (DOT/Mermaid/JSON), `bmad sprint validate-deps` cycle + orphan + placeholder-smell detection
+
+L2 has stable exit codes (see [Stable exit codes](#stable-exit-codes)) so L1 can branch programmatically without parsing stderr.
+
+### L3 — stage-specific subagents
+
+Six agent types, one per pipeline stage:
+
+| Stage | Agent | Purpose |
+|---|---|---|
+| Hydrate | `story-hydrator` | JIT-hydrate a lightweight story from epics.md into a full per-story spec |
+| ATDD (strict mode) | `atdd-writer` | Write failing acceptance tests before implementation (TDD red phase) |
+| Implement | `tdd-implementer` | TDD green + refactor cycle |
+| Test gap-coverage (strict) | `test-automate` | Expand unit/integration/contract tests ATDD missed |
+| Test quality review (strict) | `test-reviewer` | 8-dimension test quality audit (0-100 score) |
+| Code review | `code-reviewer` | Adversarial review of source code (not tests — that's `test-reviewer`) |
+
+L3 agents are spawned via Claude's `Agent()` tool with the rendered prompt from L2. Each agent's final line MUST be `TOKEN_BREAKDOWN: input=N output=N cache_read=N cache_create=N` — L1 parses it via regex `^TOKEN_BREAKDOWN: input=(\d+) output=(\d+) cache_read=(\d+) cache_create=(\d+)\s*$` and feeds the four fields to `bmad dispatch record`.
+
+### Installation into a consuming project
+
+Bmad-cli ships the L1 orchestrator skill + 7 helper skills + 6 L3 agents as embedded files (`go:embed`). To drop them into your project's `.claude/`:
+
+```bash
+go install github.com/sosalejandro/bmad-story-runner-cli/cmd/bmad@latest
+bmad install --target .claude/
+```
+
+This writes:
+- `.claude/agents/{story-hydrator,atdd-writer,tdd-implementer,test-automate,test-reviewer,code-reviewer}.md`
+- `.claude/skills/{bmad-v6-orchestrator,context-propagation,docker-up,healthcheck,port-pool,sprint-planning,story-checkpoint,sweeper}/SKILL.md`
+
+By default `bmad install` refuses to overwrite divergent files (exit 50 CONFLICT, lists the divergent paths on stderr). Use `--force` to overwrite, `--dry-run` to preview. Identical-bytes targets are skipped silently so re-running is idempotent.
+
 ## Commands
 
 ### `bmad init <docs-folder>`
