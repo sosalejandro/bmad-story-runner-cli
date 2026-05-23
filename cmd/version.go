@@ -21,9 +21,9 @@ import (
 // binary it produces. This means `go install`-based installs now report
 // the actual installed version instead of the default ldflags placeholders.
 var (
-	Version   = "v0.4.2"
-	CommitSHA = "86f5148"
-	BuildDate = "2026-05-23T06:34:35Z"
+	Version   = "v0.5.0"
+	CommitSHA = "6190911"
+	BuildDate = "2026-05-23T06:53:45Z"
 )
 
 // defaults captures the package-level zero state so VersionString can tell
