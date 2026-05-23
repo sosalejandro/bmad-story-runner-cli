@@ -22,11 +22,31 @@ type SynthesisResult struct {
 	// the total deps of that story.
 	SynthesizedDeps map[string][]string
 
+	// SynthesizedKinds parallels SynthesizedDeps and records WHICH kind
+	// of synthesis produced each edge — 'epic_synth' (from
+	// requires_epics:) vs 'epic_synth_stories' (from requires_stories:).
+	// Same index ordering as SynthesizedDeps[id], so callers can correlate
+	// dep id ↔ kind without a second map lookup. Issue #54.
+	SynthesizedKinds map[string][]SynthEdgeKind
+
 	// Warnings collects non-fatal diagnostics the planner should
 	// surface to the operator (placeholder linear-chain smell, missing
 	// referenced epics, etc.). Empty when the input was clean.
 	Warnings []string
 }
+
+// SynthEdgeKind discriminates the synthesis source. Distinct from
+// domain/state.DependencyEdgeKind so the application layer doesn't pull
+// the persistence-shaped enum into pure-function space; the planner maps
+// between the two when it persists.
+type SynthEdgeKind string
+
+const (
+	// SynthFromEpicRequires — generated from `requires_epics: [N]`.
+	SynthFromEpicRequires SynthEdgeKind = "epic_synth"
+	// SynthFromStoryRequires — generated from `requires_stories: [...]`.
+	SynthFromStoryRequires SynthEdgeKind = "epic_synth_stories"
+)
 
 // SynthesizeRequiresEpics walks every epic + its stories and computes the
 // `requires_epics:` / `requires_stories:` expansion. Pure function — no
@@ -57,7 +77,8 @@ type SynthesisResult struct {
 //     they're typos.
 func SynthesizeRequiresEpics(epics []ParsedEpic, stories []ParsedStory) SynthesisResult {
 	res := SynthesisResult{
-		SynthesizedDeps: make(map[string][]string, len(stories)),
+		SynthesizedDeps:  make(map[string][]string, len(stories)),
+		SynthesizedKinds: make(map[string][]SynthEdgeKind, len(stories)),
 	}
 
 	// Index: epic id → its parsed header (so we can look up RequiresEpics
@@ -116,20 +137,23 @@ func SynthesizeRequiresEpics(epics []ParsedEpic, stories []ParsedStory) Synthesi
 			bypass[b] = struct{}{}
 		}
 
-		// Track edges we've already added for this story, including the
-		// story's own declared deps — so synthesized output never duplicates
-		// what the author already wrote. The planner-side wipe-then-replace
-		// loop would handle dupes anyway, but de-duping here keeps the
-		// surfaced "N synthesized" count honest.
+		// Track synth edges we've already produced for this story so the
+		// output slice doesn't contain duplicates (e.g. the same target id
+		// would-be-emitted via both requires_epics and requires_stories).
+		// We intentionally do NOT pre-seed this with the author's
+		// depends_on — the planner needs the synth attribution for every
+		// epic-level edge even when the author independently wrote the
+		// same target, so the persisted edge_kind reflects the upstream
+		// declaration (issue #54). The planner's combine-step (in
+		// PlanWithEpics) is the single place that dedupes synth vs author
+		// for the "additional edges added" count.
 		seen := make(map[string]struct{}, len(s.Frontmatter.DependsOn)+4)
 		seen[s.Frontmatter.StoryID] = struct{}{} // never self-depend
-		for _, d := range s.Frontmatter.DependsOn {
-			if d != "" {
-				seen[d] = struct{}{}
-			}
-		}
 
+		// Track edges + their attribution. Parallel slices stay in lockstep
+		// so the final sort can carry both columns together.
 		var synth []string
+		var kinds []SynthEdgeKind
 
 		// (a) requires_epics expansion: last story of each referenced epic
 		for _, ref := range owner.Frontmatter.RequiresEpics {
@@ -155,6 +179,7 @@ func SynthesizeRequiresEpics(epics []ParsedEpic, stories []ParsedStory) Synthesi
 			}
 			seen[last] = struct{}{}
 			synth = append(synth, last)
+			kinds = append(kinds, SynthFromEpicRequires)
 		}
 
 		// (b) requires_stories expansion: literal cross-cutting pins
@@ -174,13 +199,27 @@ func SynthesizeRequiresEpics(epics []ParsedEpic, stories []ParsedStory) Synthesi
 			}
 			seen[pin] = struct{}{}
 			synth = append(synth, pin)
+			kinds = append(kinds, SynthFromStoryRequires)
 		}
 
 		if len(synth) > 0 {
-			// Deterministic order: natural-id ascending so test fixtures
-			// don't flap on map-iteration randomness.
-			sort.Slice(synth, func(i, j int) bool { return naturalLess(synth[i], synth[j]) })
-			res.SynthesizedDeps[s.Frontmatter.StoryID] = synth
+			// Deterministic order: natural-id ascending. We co-sort kinds
+			// using an index permutation so a row keeps its attribution
+			// even when stories_requires-pinned ids interleave with
+			// requires_epics-derived ones.
+			idx := make([]int, len(synth))
+			for i := range idx {
+				idx[i] = i
+			}
+			sort.Slice(idx, func(i, j int) bool { return naturalLess(synth[idx[i]], synth[idx[j]]) })
+			sortedDeps := make([]string, len(synth))
+			sortedKinds := make([]SynthEdgeKind, len(synth))
+			for i, src := range idx {
+				sortedDeps[i] = synth[src]
+				sortedKinds[i] = kinds[src]
+			}
+			res.SynthesizedDeps[s.Frontmatter.StoryID] = sortedDeps
+			res.SynthesizedKinds[s.Frontmatter.StoryID] = sortedKinds
 		}
 	}
 

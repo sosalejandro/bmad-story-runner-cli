@@ -61,9 +61,66 @@ type Stories interface {
 	ReapStaleClaims(ctx context.Context, ttlSeconds int) ([]string, error)
 }
 
+// DependencyEdgeKind classifies how a story_dependencies row entered the
+// table — pre-#54 every row was implicitly "explicit" (a story author's
+// own depends_on declaration). Issue #54 adds two synthesised kinds so
+// downstream consumers (graph viz, validate-deps) can distinguish them.
+//
+// Kept as a string-typed alias rather than an int enum so the on-disk
+// representation is human-readable and we can introduce new kinds (e.g.
+// "infer_deps_prose") without bumping a schema version.
+type DependencyEdgeKind string
+
+const (
+	// EdgeKindExplicit — story-level `depends_on: [...]` declaration.
+	// This is the migration default for back-filled rows so pre-#54
+	// behaviour is preserved.
+	EdgeKindExplicit DependencyEdgeKind = "explicit"
+	// EdgeKindEpicSynth — synthesised by the issue #46 resolver from an
+	// epic header's `requires_epics: [N]` field.
+	EdgeKindEpicSynth DependencyEdgeKind = "epic_synth"
+	// EdgeKindEpicSynthStories — synthesised from an epic header's
+	// `requires_stories: [...]` field. Distinct from EdgeKindEpicSynth so
+	// findings + visualisations can attribute it precisely; both kinds
+	// share the dashed-line treatment in `bmad sprint graph`.
+	EdgeKindEpicSynthStories DependencyEdgeKind = "epic_synth_stories"
+)
+
+// IsSynthesized reports whether the kind came from epic-level synthesis
+// (vs. story-author intent). Used by `bmad sprint validate-deps` to
+// suppress the placeholder-smell finding for synthesised edges and by
+// `bmad sprint graph` to pick dashed rendering.
+func (k DependencyEdgeKind) IsSynthesized() bool {
+	switch k {
+	case EdgeKindEpicSynth, EdgeKindEpicSynthStories:
+		return true
+	default:
+		return false
+	}
+}
+
+// DependencyEdge is one (story → prerequisite) tuple with its source kind.
+// Surface this struct only when a consumer needs the kind — story-status
+// consumers that just want the prereq ids continue to use `Of`.
+type DependencyEdge struct {
+	StoryID     string
+	DependsOnID string
+	Kind        DependencyEdgeKind
+}
+
 // StoryDependencies is the m:n bridge between a story and its prerequisites.
 type StoryDependencies interface {
+	// Add inserts an explicit (story-level depends_on) edge. Kept for the
+	// pre-#54 call sites that don't carry an edge-kind context (raw CRUD
+	// adapters, manual repair tooling); the planner uses AddWithKind to
+	// preserve synthesis attribution.
 	Add(ctx context.Context, storyID, dependsOnID string) error
+	// AddWithKind inserts a tagged edge — used by the planner so synth
+	// edges are distinguishable from explicit ones at read time. Idempotent
+	// against the (story_id, depends_on_id) primary key; existing rows are
+	// left untouched (kind is NOT overwritten on conflict so a manually-
+	// promoted edge is never silently demoted).
+	AddWithKind(ctx context.Context, storyID, dependsOnID string, kind DependencyEdgeKind) error
 	Remove(ctx context.Context, storyID, dependsOnID string) error
 	// RemoveAllFor deletes every dependency edge for storyID. Used by
 	// `bmad sprint plan` to make re-ingest idempotent: when an operator
@@ -74,6 +131,9 @@ type StoryDependencies interface {
 	// No-op (not an error) if the story has no dependency rows.
 	RemoveAllFor(ctx context.Context, storyID string) error
 	Of(ctx context.Context, storyID string) ([]string, error)
+	// EdgesOf returns the dependency rows for storyID with their kinds.
+	// Sorted by depends_on_id ascending for deterministic output.
+	EdgesOf(ctx context.Context, storyID string) ([]DependencyEdge, error)
 	DependentsOf(ctx context.Context, storyID string) ([]string, error)
 }
 

@@ -15,11 +15,29 @@ func NewStoryDependenciesStore(db *DB) *StoryDependenciesStore {
 }
 
 func (s *StoryDependenciesStore) Add(ctx context.Context, storyID, dependsOnID string) error {
+	// Pre-#54 entry point — defaults to the 'explicit' kind so callers that
+	// don't carry synthesis context (manual repair tooling, raw CRUD)
+	// preserve the historical semantics.
+	return s.AddWithKind(ctx, storyID, dependsOnID, state.EdgeKindExplicit)
+}
+
+// AddWithKind inserts a tagged edge. INSERT OR IGNORE keeps the call
+// idempotent against the (story_id, depends_on_id) primary key — when a
+// row already exists we deliberately do NOT overwrite its edge_kind. This
+// means a row previously written as 'explicit' (e.g. by a story author's
+// depends_on) wins over a later 'epic_synth' that points at the same
+// upstream story; the planner's wipe-then-replace flow (RemoveAllFor +
+// AddWithKind) guarantees the right kind on every re-ingest, so this
+// preserve-on-conflict policy is only the safety net.
+func (s *StoryDependenciesStore) AddWithKind(ctx context.Context, storyID, dependsOnID string, kind state.DependencyEdgeKind) error {
+	if kind == "" {
+		kind = state.EdgeKindExplicit
+	}
 	_, err := s.db.sqlDB().ExecContext(ctx,
-		`INSERT OR IGNORE INTO story_dependencies (story_id, depends_on_id) VALUES (?, ?)`,
-		storyID, dependsOnID)
+		`INSERT OR IGNORE INTO story_dependencies (story_id, depends_on_id, edge_kind) VALUES (?, ?, ?)`,
+		storyID, dependsOnID, string(kind))
 	if err != nil {
-		return fmt.Errorf("story_dependencies add %q->%q: %w", storyID, dependsOnID, err)
+		return fmt.Errorf("story_dependencies add %q->%q (%s): %w", storyID, dependsOnID, kind, err)
 	}
 	return nil
 }
@@ -52,10 +70,69 @@ func (s *StoryDependenciesStore) Of(ctx context.Context, storyID string) ([]stri
 		storyID)
 }
 
+// EdgesOf returns each dependency row for storyID with its edge_kind, sorted
+// deterministically by depends_on_id. Consumers that need the kind (graph
+// renderer, validate-deps placeholder suppression) call this; consumers
+// that only care about the prereq id list keep using `Of` to avoid a kind
+// allocation per row.
+func (s *StoryDependenciesStore) EdgesOf(ctx context.Context, storyID string) ([]state.DependencyEdge, error) {
+	rows, err := s.db.sqlDB().QueryContext(ctx,
+		`SELECT depends_on_id, edge_kind FROM story_dependencies
+		 WHERE story_id = ? ORDER BY depends_on_id`,
+		storyID)
+	if err != nil {
+		return nil, fmt.Errorf("story_dependencies edges-of %q: %w", storyID, err)
+	}
+	defer rows.Close()
+	var out []state.DependencyEdge
+	for rows.Next() {
+		e := state.DependencyEdge{StoryID: storyID}
+		var kind string
+		if err := rows.Scan(&e.DependsOnID, &kind); err != nil {
+			return nil, fmt.Errorf("story_dependencies edges-of %q scan: %w", storyID, err)
+		}
+		e.Kind = state.DependencyEdgeKind(kind)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 func (s *StoryDependenciesStore) DependentsOf(ctx context.Context, storyID string) ([]string, error) {
 	return queryIDs(ctx, s.db,
 		`SELECT story_id FROM story_dependencies WHERE depends_on_id = ? ORDER BY story_id`,
 		storyID)
+}
+
+// QuerySyntheticEdges returns every story_dependencies row whose edge_kind
+// is not 'explicit' — i.e. the rows the planner wrote from epic-level
+// synthesis (issue #46) and tagged via #54. The caller (validate-deps cobra
+// shim) reshapes the slice into a SyntheticEdgeSet for the validator.
+//
+// Lives as a package-level function (not a method on StoryDependenciesStore)
+// because the consumer doesn't otherwise need the store — keeping the call
+// site free of an unused adapter handle. Returns an empty slice (no error)
+// when the table is empty; a non-existent column would surface at migration
+// time, never here.
+func QuerySyntheticEdges(ctx context.Context, db *DB) ([]state.DependencyEdge, error) {
+	rows, err := db.sqlDB().QueryContext(ctx,
+		`SELECT story_id, depends_on_id, edge_kind FROM story_dependencies
+		 WHERE edge_kind != ? ORDER BY story_id, depends_on_id`,
+		string(state.EdgeKindExplicit))
+	if err != nil {
+		return nil, fmt.Errorf("query synthetic edges: %w", err)
+	}
+	defer rows.Close()
+	var out []state.DependencyEdge
+	for rows.Next() {
+		var e state.DependencyEdge
+		var kind string
+		if err := rows.Scan(&e.StoryID, &e.DependsOnID, &kind); err != nil {
+			return nil, fmt.Errorf("query synthetic edges scan: %w", err)
+		}
+		e.Kind = state.DependencyEdgeKind(kind)
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // StoryAffectsStore — sqlite adapter for state.StoryAffects.

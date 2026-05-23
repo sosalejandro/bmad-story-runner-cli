@@ -1,0 +1,33 @@
+-- Migration 0005 — edge_kind column on story_dependencies (issue #54).
+--
+-- Discriminates how each dependency edge entered the table:
+--
+--   'explicit'           — story author's own `depends_on: [...]` declaration
+--                          (the only flavour that existed pre-#46; default
+--                          for backward compatibility so existing rows keep
+--                          behaving as story-level deps without re-ingest)
+--   'epic_synth'         — synthesised by the issue #46 resolver from an
+--                          epic-level `requires_epics: [N]` declaration —
+--                          renders as a dashed line in `bmad sprint graph`
+--   'epic_synth_stories' — synthesised from an epic-level
+--                          `requires_stories: [...]` declaration (literal
+--                          cross-cutting story pins); also dashed
+--
+-- Storage:
+--
+--   * TEXT (not an enum) to stay future-proof if a new synthesis source
+--     emerges — existing readers fall back to the default styling for
+--     unknown kinds, never error.
+--   * NOT NULL DEFAULT 'explicit' so the column is fully defined for every
+--     row the moment the ALTER runs; SQLite back-fills existing rows with
+--     the default, preserving behaviour for callers that haven't been
+--     touched by the planner since the migration.
+--
+-- Idempotency: SQLite's ALTER TABLE ... ADD COLUMN errors on re-run, so the
+-- migration runner's schema_version gate is what makes the migration
+-- effectively idempotent (an already-applied version is skipped). This file
+-- itself is a single atomic ALTER inside the migration transaction, so a
+-- mid-run crash leaves the schema either fully at v4 or fully at v5 — never
+-- partially mutated.
+
+ALTER TABLE story_dependencies ADD COLUMN edge_kind TEXT NOT NULL DEFAULT 'explicit';
