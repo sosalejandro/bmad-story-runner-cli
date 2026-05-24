@@ -382,6 +382,73 @@ func TestCheckpoints_FireAndDecide(t *testing.T) {
 	}
 }
 
+// TestCheckpoints_ResolveAllUnresolved is the issue #71 sub-4 regression
+// guard at the port layer: a single call must stamp every NULL-decision
+// row, and re-calls (or empty-table calls) must be silent no-ops returning
+// zero — never an error.
+func TestCheckpoints_ResolveAllUnresolved(t *testing.T) {
+	t.Parallel()
+	db := newTempDB(t)
+	store := sqlite.NewCheckpointsStore(db)
+	ctx := context.Background()
+
+	// No-op when no rows.
+	if n, err := store.ResolveAllUnresolved(ctx, state.DecisionContinue, time.Now().UTC()); err != nil || n != 0 {
+		t.Fatalf("ResolveAll on empty: n=%d err=%v, want n=0 err=nil", n, err)
+	}
+
+	// Fire two open + one already-decided row.
+	d1 := "count:1"
+	d2 := "complexity:2"
+	d3 := "count:3-resolved"
+	id1, _ := store.Fire(ctx, state.Checkpoint{TriggerKind: state.CheckpointCount, StoriesSinceLast: 1, SummaryJSON: "{}", IdempotencyKey: &d1})
+	id2, _ := store.Fire(ctx, state.Checkpoint{TriggerKind: state.CheckpointComplexity, StoriesSinceLast: 2, SummaryJSON: "{}", IdempotencyKey: &d2})
+	id3, _ := store.Fire(ctx, state.Checkpoint{TriggerKind: state.CheckpointCount, StoriesSinceLast: 3, SummaryJSON: "{}", IdempotencyKey: &d3})
+	// Mark id3 as already decided so we can prove ResolveAll doesn't touch
+	// rows that aren't NULL.
+	if err := store.Decide(ctx, id3, state.DecisionAdjust, time.Now().UTC()); err != nil {
+		t.Fatalf("seed Decide id3: %v", err)
+	}
+
+	n, err := store.ResolveAllUnresolved(ctx, state.DecisionContinue, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("ResolveAll: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("ResolveAll touched %d, want 2 (id1+id2; id3 was already decided)", n)
+	}
+
+	// id1 and id2 now stamped with continue.
+	for _, id := range []int64{id1, id2} {
+		cp, err := store.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get %d: %v", id, err)
+		}
+		if cp.UserDecision == nil || *cp.UserDecision != state.DecisionContinue {
+			t.Errorf("id=%d UserDecision = %v, want continue", id, cp.UserDecision)
+		}
+		if cp.DecidedAt == nil {
+			t.Errorf("id=%d DecidedAt nil", id)
+		}
+	}
+
+	// id3 still has its original adjust decision.
+	cp3, _ := store.Get(ctx, id3)
+	if cp3.UserDecision == nil || *cp3.UserDecision != state.DecisionAdjust {
+		t.Errorf("id3 decision changed: got %v, want adjust (ResolveAll must not overwrite)", cp3.UserDecision)
+	}
+
+	// Idempotency: re-running with no open rows is a zero-count no-op.
+	if n2, err := store.ResolveAllUnresolved(ctx, state.DecisionContinue, time.Now().UTC()); err != nil || n2 != 0 {
+		t.Fatalf("ResolveAll re-run: n=%d err=%v, want n=0 err=nil", n2, err)
+	}
+
+	// Final Unresolved query returns nil.
+	if u, _ := store.Unresolved(ctx); u != nil {
+		t.Errorf("Unresolved after ResolveAll = %+v, want nil", u)
+	}
+}
+
 // ---------- Depguard ----------
 
 func TestDepguard_FlipAndHistory(t *testing.T) {

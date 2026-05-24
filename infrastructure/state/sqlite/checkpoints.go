@@ -98,6 +98,26 @@ func (s *CheckpointsStore) Decide(ctx context.Context, id int64, decision state.
 	return nil
 }
 
+// ResolveAllUnresolved stamps every open (user_decision IS NULL) checkpoint
+// row with the supplied decision in a single UPDATE. Used by `bmad sprint
+// resume` (issue #71) so that resuming a paused sprint also clears any
+// pending halt rows — otherwise the next `sprint status --json` re-surfaces
+// the same checkpoint and the orchestrator spins on it forever.
+//
+// Returns the count of rows that transitioned from NULL → decision. Zero
+// rows is a normal, non-error outcome (no checkpoint was open).
+func (s *CheckpointsStore) ResolveAllUnresolved(ctx context.Context, decision state.CheckpointDecision, when time.Time) (int, error) {
+	res, err := s.db.sqlDB().ExecContext(ctx, `
+		UPDATE checkpoints SET user_decision = ?, decided_at = ?
+		WHERE user_decision IS NULL
+	`, string(decision), when)
+	if err != nil {
+		return 0, fmt.Errorf("checkpoints resolve-all: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 func (s *CheckpointsStore) StoriesSinceLast(ctx context.Context) (int, error) {
 	// "Since last checkpoint" = stories with completed_at > MAX(triggered_at).
 	// If no checkpoints exist yet, count all completed stories.

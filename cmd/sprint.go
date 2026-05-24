@@ -270,10 +270,29 @@ func newSprintPauseCmd() *cobra.Command {
 
 // ---------- resume ----------
 
+// newSprintResumeCmd unpauses the sprint AND clears any open §12.5
+// checkpoint rows (issue #71).
+//
+// Why both in one command: prior to this fix, `bmad sprint resume` only
+// cleared `sprint.paused` but left `user_decision IS NULL` rows alone, so
+// the very next `bmad sprint status --json` re-surfaced
+// `unresolved_checkpoint` and the orchestrator loop would call `resume`
+// again on each iteration without making forward progress.
+//
+// Decision stamped: `state.DecisionContinue` — the operator running
+// `sprint resume` is implicitly declaring "I want to proceed past this
+// halt". Operators who instead want `adjust` or `halt` should use
+// `bmad checkpoint decide` (or its successor) directly — this command is
+// the happy-path shortcut for the most common case.
+//
+// All-or-most-recent rule: ResolveAllUnresolved stamps every NULL row in a
+// single UPDATE. We choose ALL (not just MAX(id)) because a sprint with
+// multiple stuck checkpoints would otherwise need N resume calls to clear;
+// the orchestrator can re-Fire if it genuinely needs a new halt.
 func newSprintResumeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "resume",
-		Short: "Clear sprint.paused; resume orchestrator on next invocation",
+		Short: "Clear sprint.paused + resolve any open §12.5 checkpoint rows (issue #71)",
 		RunE: func(c *cobra.Command, args []string) error {
 			ctx := context.Background()
 			db, err := openV6DB(ctx)
@@ -285,11 +304,27 @@ func newSprintResumeCmd() *cobra.Command {
 			if err := cfg.Delete(ctx, sprintPausedKey); err != nil {
 				return err
 			}
+			checkpoints := sqlite.NewCheckpointsStore(db)
+			cleared, err := checkpoints.ResolveAllUnresolved(ctx,
+				state.DecisionContinue, time.Now().UTC())
+			if err != nil {
+				return fmt.Errorf("sprint resume: resolve checkpoints: %w", err)
+			}
 			if jsonOutput {
 				return emitJSONStdout(commandPathSansRoot(c), nil,
-					map[string]any{"ok": true, "paused": false}, nil)
+					map[string]any{
+						"ok":                    true,
+						"paused":                false,
+						"checkpoints_resolved":  cleared,
+						"checkpoint_decision":   string(state.DecisionContinue),
+					}, nil)
 			}
-			fmt.Println("sprint resumed")
+			if cleared > 0 {
+				fmt.Printf("sprint resumed (cleared %d open checkpoint(s) → %s)\n",
+					cleared, state.DecisionContinue)
+			} else {
+				fmt.Println("sprint resumed")
+			}
 			return nil
 		},
 	}
