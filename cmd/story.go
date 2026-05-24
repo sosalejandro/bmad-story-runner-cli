@@ -772,6 +772,14 @@ Run per-story before each dispatch:
 
 Or batch-pre-build for the next sprint slice ahead of time.`,
 		Args: cobra.ExactArgs(1),
+		// Issue #71: legacy behaviour dumped the full cobra usage block
+		// on every runtime error (e.g. "story not found"), pushing the
+		// real diagnostic off the top of small terminal captures and
+		// making the failure look like a help-text print. Silencing usage
+		// + error keeps the failure mode legible: one Error: line + the
+		// non-zero exit, nothing else.
+		SilenceUsage:  true,
+		SilenceErrors: false,
 		RunE: func(c *cobra.Command, args []string) error {
 			ctx := context.Background()
 			svc, cleanup, err := openStoryService(ctx)
@@ -812,7 +820,39 @@ Or batch-pre-build for the next sprint slice ahead of time.`,
 				RepoRoot:         repoRoot,
 			})
 			if err != nil {
+				// SilenceUsage above keeps the cobra dump out of the
+				// way; the wrapped error message from BuildStoryContext
+				// already names the missing story id + epics path, so
+				// cobra's default `Error: …\n` line is sufficient.
+				// Audit log records the exit-1.
 				return err
+			}
+
+			// Defensive post-write verification (issue #71): the build
+			// path has multiple early-return points + a deferred
+			// out.Close that historically swallowed flush errors. If we
+			// claim success we must be able to stat a non-empty file.
+			if res == nil || res.TotalBytes == 0 {
+				return fmt.Errorf("context-bundle: write completed but %s is empty or missing — refusing to report success", outPath)
+			}
+
+			absOut, _ := filepath.Abs(res.OutPath)
+			if absOut == "" {
+				absOut = res.OutPath
+			}
+
+			if jsonOutput {
+				return emitJSONStdout(commandPathSansRoot(c),
+					map[string]any{"story_id": id},
+					res, res.Warnings)
+			}
+			// Human-readable confirmation FIRST so a truncated capture
+			// (e.g. `… | tail -1`) still sees "where did the file go?".
+			// JSON dump follows for callers that pipe to jq.
+			fmt.Fprintf(os.Stderr, "bundle written to %s (%d bytes, %d sections)\n",
+				absOut, res.TotalBytes, len(res.Sections))
+			for _, w := range res.Warnings {
+				fmt.Fprintf(os.Stderr, "WARN: %s\n", w)
 			}
 			return json.NewEncoder(os.Stdout).Encode(res)
 		},
