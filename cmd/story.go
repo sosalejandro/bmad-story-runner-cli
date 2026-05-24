@@ -251,7 +251,30 @@ agent returns produces the same instruction.`,
 
 // ---------- next ----------
 
+// newStoryNextCmd is the canonical `bmad story next` command. The same
+// command body is also exposed at the root as `bmad next-actions` via
+// newNextActionsAliasCmd — both call buildNextCmd with their own Use
+// string so flag-bound state isn't shared across the two registrations.
 func newStoryNextCmd() *cobra.Command {
+	return buildNextCmd("next")
+}
+
+// newNextActionsAliasCmd is the top-level `bmad next-actions` alias
+// (issue #71 sub-issue 1). The orchestrator skill documents this verb
+// throughout its sprint loop spec; the real command lives at
+// `bmad story next`. This alias preserves the entire flag surface
+// (--max-parallel, --claim, --claimer, --scope, --no-hydration-priority)
+// so skill docs referencing `bmad next-actions` resolve at runtime.
+func newNextActionsAliasCmd() *cobra.Command {
+	cmd := buildNextCmd("next-actions")
+	cmd.Short = "Alias of `bmad story next` — emit a parallel-eligible next-action batch"
+	// Persistent --state flag normally lives on the story parent; surface
+	// it here too so `bmad next-actions --state ./bmad-state.db` works.
+	addV6PersistentFlags(cmd)
+	return cmd
+}
+
+func buildNextCmd(use string) *cobra.Command {
 	var (
 		max                 int
 		claim               bool
@@ -260,7 +283,7 @@ func newStoryNextCmd() *cobra.Command {
 		noHydrationPriority bool
 	)
 	cmd := &cobra.Command{
-		Use:   "next",
+		Use:   use,
 		Short: "Emit a parallel-eligible next-action batch",
 		Long: `By default emits candidates WITHOUT mutating state (--claim=false).
 With --claim, atomically marks the picked stories claimed_at + claimed_by

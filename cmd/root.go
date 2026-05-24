@@ -54,26 +54,27 @@ so Claude does not need to write inline Python or bash scripts.`,
 	root.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Emit output as a JSON envelope (schema v1)")
 
 	root.AddCommand(
-		newInitCmd(),       // v6 — sqlite init
-		newInstallCmd(),    // v6 — drop embedded agents + skills into .claude/
-		newConfigCmd(),     // v6 — runtime config get/set
-		newStoryCmd(),      // v6 — story namespace
-		newEnvCmd(),        // v6 — env namespace (port-pool + sweeper)
-		newWorktreeCmd(),   // v6 — worktree namespace
-		newDepguardCmd(),   // v6 — depguard flip ratchet
-		newGateCmd(),       // v6 — gate namespace (v4 surface preserved)
-		newDispatchCmd(),   // v6 — dispatch record (§12.7 token cost)
-		newRenderCmd(),     // v6 — prompt template render
+		newInitCmd(),        // v6 — sqlite init
+		newInstallCmd(),     // v6 — drop embedded agents + skills into .claude/
+		newConfigCmd(),      // v6 — runtime config get/set
+		newStoryCmd(),       // v6 — story namespace
+		newEnvCmd(),         // v6 — env namespace (port-pool + sweeper)
+		newWorktreeCmd(),    // v6 — worktree namespace
+		newDepguardCmd(),    // v6 — depguard flip ratchet
+		newGateCmd(),        // v6 — gate namespace (v4 surface preserved)
+		newDispatchCmd(),    // v6 — dispatch record (§12.7 token cost)
+		newRenderCmd(),      // v6 — prompt template render
 		newSystemCheckCmd(), // v6 — host resource probe
 		newDoctorCmd(),      // v6 — env self-check (binary/atlas/db/schema/exit codes)
 		newSprintCmd(),      // v6 — sprint namespace (plan/run/pause/resume/status)
-		newMigrateCmd(),    // v6 — one-shot v4 progress.json → v6 sqlite import
+		newMigrateCmd(),     // v6 — one-shot v4 progress.json → v6 sqlite import
 		newStatusCmd(),
 		newSetStatusCmd(),
 		newSetCompleteCmd(),
 		newBulkCompleteCmd(),
 		newAddConcernsCmd(),
 		newNextCmd(),
+		newNextActionsAliasCmd(), // v6 — top-level alias for `bmad story next` (issue #71)
 		newMarkStoryFileCmd(),
 		newScanCmd(),
 		newAssignGroupsCmd(),
