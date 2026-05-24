@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.5.0...v0.5.1) (2026-05-24)
+
+
+### Bug Fixes
+
+* **sprint:** resume now resolves open §12.5 checkpoint rows (closes [#71](https://github.com/sosalejandro/bmad-story-runner-cli/issues/71) sub-4) ([#73](https://github.com/sosalejandro/bmad-story-runner-cli/issues/73)) ([0aff7f9](https://github.com/sosalejandro/bmad-story-runner-cli/commit/0aff7f99b03f78844900f45960ac733dd27217b8))
+* **story:** context-bundle silent-failure UX + close-error swallowing (closes [#71](https://github.com/sosalejandro/bmad-story-runner-cli/issues/71)-5) ([#72](https://github.com/sosalejandro/bmad-story-runner-cli/issues/72)) ([12e6f20](https://github.com/sosalejandro/bmad-story-runner-cli/commit/12e6f204c2ddb9d5fc81524c4b98e8ec46e4af74))
+
 ## [0.5.0](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.4.2...v0.5.0) (2026-05-23)
 
 
