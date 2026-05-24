@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/sosalejandro/bmad-story-runner-cli/domain/state"
@@ -338,6 +339,168 @@ func TestJSON_SprintPauseResume(t *testing.T) {
 	}
 	if resumeR["ok"] != true || resumeR["paused"] != false {
 		t.Errorf("resume result wrong: %+v", resumeR)
+	}
+}
+
+// TestJSON_SprintResume_ClearsUnresolvedCheckpoint is the issue #71 sub-4
+// regression guard. Pre-fix, `bmad sprint resume` only cleared
+// `sprint.paused` but left rows with `user_decision IS NULL` alone — so
+// the subsequent `bmad sprint status --json` re-surfaced
+// `unresolved_checkpoint` and the orchestrator loop spun on it forever.
+//
+// We exercise the full sequence the real orchestrator runs:
+//   1. seed a checkpoint with user_decision = NULL (Fire())
+//   2. assert sprint status surfaces it under unresolved_checkpoint
+//   3. invoke `bmad sprint resume`
+//   4. assert sprint status now reports unresolved_checkpoint = null
+//   5. assert the underlying row was stamped with decision="continue"
+func TestJSON_SprintResume_ClearsUnresolvedCheckpoint(t *testing.T) {
+	dbPath := seedStoriesForJSON(t)
+
+	// Step 1 — fire an open checkpoint directly through the port (mirrors
+	// what the §12.5 dual-trigger does inside the orchestrator).
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	checkpoints := sqlite.NewCheckpointsStore(db)
+	idemKey := "count:21:7.4"
+	id, err := checkpoints.Fire(ctx, state.Checkpoint{
+		TriggerKind:      state.CheckpointCount,
+		StoriesSinceLast: 21,
+		SummaryJSON:      `{}`,
+		IdempotencyKey:   &idemKey,
+	})
+	if err != nil {
+		t.Fatalf("Fire checkpoint: %v", err)
+	}
+	db.Close()
+
+	// Step 2 — confirm `sprint status --json` surfaces the open checkpoint.
+	envBefore, _ := runCmdJSONCapture(t, dbPath, "sprint", "status")
+	commonEnvelopeAssertions(t, envBefore, "sprint status")
+	var beforeR map[string]any
+	if err := json.Unmarshal(envBefore.Result, &beforeR); err != nil {
+		t.Fatalf("status-before unmarshal: %v", err)
+	}
+	if beforeR["unresolved_checkpoint"] == nil {
+		t.Fatalf("before resume: unresolved_checkpoint should be non-nil, got %+v",
+			beforeR["unresolved_checkpoint"])
+	}
+
+	// Step 3 — `bmad sprint resume` should clear paused AND resolve the
+	// checkpoint. Pre-fix, only `paused` was cleared.
+	envResume, _ := runCmdJSONCapture(t, dbPath, "sprint", "resume")
+	commonEnvelopeAssertions(t, envResume, "sprint resume")
+	var resumeR map[string]any
+	if err := json.Unmarshal(envResume.Result, &resumeR); err != nil {
+		t.Fatalf("resume unmarshal: %v", err)
+	}
+	if resumeR["ok"] != true || resumeR["paused"] != false {
+		t.Errorf("resume result: ok/paused wrong: %+v", resumeR)
+	}
+	if resumeR["checkpoints_resolved"] != float64(1) {
+		t.Errorf("checkpoints_resolved = %v, want 1", resumeR["checkpoints_resolved"])
+	}
+	if resumeR["checkpoint_decision"] != "continue" {
+		t.Errorf("checkpoint_decision = %v, want \"continue\"", resumeR["checkpoint_decision"])
+	}
+
+	// Step 4 — `sprint status --json` must now report unresolved_checkpoint
+	// = nil. This is the bug repro: pre-fix this still showed the row.
+	envAfter, _ := runCmdJSONCapture(t, dbPath, "sprint", "status")
+	commonEnvelopeAssertions(t, envAfter, "sprint status")
+	var afterR map[string]any
+	if err := json.Unmarshal(envAfter.Result, &afterR); err != nil {
+		t.Fatalf("status-after unmarshal: %v", err)
+	}
+	if afterR["unresolved_checkpoint"] != nil {
+		t.Errorf("after resume: unresolved_checkpoint should be nil, got %+v",
+			afterR["unresolved_checkpoint"])
+	}
+
+	// Step 5 — the row itself was stamped with decision="continue" + a
+	// non-nil decided_at. Verify directly through the port; this guards
+	// against future changes that "fix" the bug by hiding rather than
+	// resolving.
+	db2, err := sqlite.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db2.Close()
+	cp, err := sqlite.NewCheckpointsStore(db2).Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get checkpoint %d: %v", id, err)
+	}
+	if cp.UserDecision == nil || *cp.UserDecision != state.DecisionContinue {
+		t.Errorf("UserDecision = %v, want %q", cp.UserDecision, state.DecisionContinue)
+	}
+	if cp.DecidedAt == nil {
+		t.Errorf("DecidedAt nil, want non-nil")
+	}
+}
+
+// TestJSON_SprintResume_NoCheckpoints_NoError ensures resume is a no-op
+// (not an error) when no checkpoints are open — the common case where
+// resume just clears `sprint.paused`.
+func TestJSON_SprintResume_NoCheckpoints_NoError(t *testing.T) {
+	dbPath := seedStoriesForJSON(t)
+	env, _ := runCmdJSONCapture(t, dbPath, "sprint", "resume")
+	commonEnvelopeAssertions(t, env, "sprint resume")
+	var r map[string]any
+	if err := json.Unmarshal(env.Result, &r); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if r["checkpoints_resolved"] != float64(0) {
+		t.Errorf("checkpoints_resolved = %v, want 0", r["checkpoints_resolved"])
+	}
+}
+
+// TestJSON_SprintResume_MultipleCheckpoints_AllCleared exercises the
+// documented "resume clears ALL open checkpoints" rule. If a sprint
+// somehow accrues multiple NULL-user_decision rows (e.g. count + complexity
+// fired before the operator could respond), one resume call clears them
+// all rather than requiring N invocations.
+func TestJSON_SprintResume_MultipleCheckpoints_AllCleared(t *testing.T) {
+	dbPath := seedStoriesForJSON(t)
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	cps := sqlite.NewCheckpointsStore(db)
+	for i, kind := range []state.CheckpointTrigger{state.CheckpointCount, state.CheckpointComplexity} {
+		k := kind
+		key := string(k) + ":seed:" + strconv.Itoa(i)
+		if _, err := cps.Fire(ctx, state.Checkpoint{
+			TriggerKind:      k,
+			StoriesSinceLast: i,
+			SummaryJSON:      `{}`,
+			IdempotencyKey:   &key,
+		}); err != nil {
+			t.Fatalf("seed checkpoint %d: %v", i, err)
+		}
+	}
+	db.Close()
+
+	env, _ := runCmdJSONCapture(t, dbPath, "sprint", "resume")
+	commonEnvelopeAssertions(t, env, "sprint resume")
+	var r map[string]any
+	if err := json.Unmarshal(env.Result, &r); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if r["checkpoints_resolved"] != float64(2) {
+		t.Errorf("checkpoints_resolved = %v, want 2 (all open rows cleared)",
+			r["checkpoints_resolved"])
+	}
+
+	// Confirm zero remain unresolved.
+	db2, _ := sqlite.Open(ctx, dbPath)
+	defer db2.Close()
+	left, _ := sqlite.NewCheckpointsStore(db2).Unresolved(ctx)
+	if left != nil {
+		t.Errorf("Unresolved after multi-resume = %+v, want nil", left)
 	}
 }
 
