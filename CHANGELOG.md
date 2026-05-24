@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.5.1...v0.5.2) (2026-05-24)
+
+
+### Bug Fixes
+
+* **cli:** repair sqlite-era regressions in list, add-concerns, and add next-actions alias ([#75](https://github.com/sosalejandro/bmad-story-runner-cli/issues/75)) ([b35491f](https://github.com/sosalejandro/bmad-story-runner-cli/commit/b35491fb8529362a432c2a7729e98bd981b9d07b))
+
 ## [0.5.1](https://github.com/sosalejandro/bmad-story-runner-cli/compare/v0.5.0...v0.5.1) (2026-05-24)
 
 
