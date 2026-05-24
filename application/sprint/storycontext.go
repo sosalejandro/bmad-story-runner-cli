@@ -40,6 +40,19 @@ type StoryContextBundle struct {
 	GeneratedAt string  `json:"generated_at"`
 }
 
+// ErrStoryNotFoundInEpics is returned by BuildStoryContext when the requested
+// StoryID is not present in the supplied epics.md. Exported so the CLI layer
+// can map it to exitcode.NotFound (40) instead of the generic exit 1.
+// (issue #71)
+var ErrStoryNotFoundInEpics = errors.New("story not found in epics")
+
+// IsStoryNotFoundErr reports whether err originated from a missing-story
+// lookup in epics.md. Used by `bmad story context-bundle` to choose the
+// NOT_FOUND exit code instead of generic user-error.
+func IsStoryNotFoundErr(err error) bool {
+	return errors.Is(err, ErrStoryNotFoundInEpics)
+}
+
 // frRefRE matches Functional-Requirement reference anchors like FR-Arch-7,
 // FR-NFR-12, FR-Saga-1, etc. Greedy on the kind so multi-word kinds
 // (e.g., FR-Arch-XYZ) still capture.
@@ -86,7 +99,11 @@ func BuildStoryContext(outPath string, sources StoryContextSources) (*StoryConte
 		return nil, fmt.Errorf("story context: extract entry: %w", err)
 	}
 	if entry == "" {
-		return nil, fmt.Errorf("story context: story %q not found in %s", sources.StoryID, sources.EpicsPath)
+		// Sentinel-wrapped so the CLI can exit NOT_FOUND (40) instead of
+		// generic UserError (1). Preserves the human-readable message in
+		// the Error() string. (issue #71)
+		return nil, fmt.Errorf("story context: story %q not found in %s: %w",
+			sources.StoryID, sources.EpicsPath, ErrStoryNotFoundInEpics)
 	}
 
 	bundle := &StoryContextBundle{
@@ -97,13 +114,28 @@ func BuildStoryContext(outPath string, sources StoryContextSources) (*StoryConte
 
 	// Render the bundle into outPath.
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
-		return nil, fmt.Errorf("story context: mkdir: %w", err)
+		return nil, fmt.Errorf("story context: mkdir %s: %w", filepath.Dir(outPath), err)
 	}
 	out, err := os.Create(outPath)
 	if err != nil {
-		return nil, fmt.Errorf("story context: create %s: %w", outPath, err)
+		// Include the absolute path so a confused operator can paste it
+		// into ls/stat without guessing whether the relative path was
+		// resolved against cwd or somewhere else.
+		absOut, _ := filepath.Abs(outPath)
+		if absOut == "" {
+			absOut = outPath
+		}
+		return nil, fmt.Errorf("story context: create %s: %w", absOut, err)
 	}
-	defer out.Close()
+	// closeErr captures errors from out.Close() so a flush failure
+	// (e.g. disk full mid-write) surfaces as a non-nil return instead of
+	// the legacy silent-success-with-empty-file behaviour. (issue #71)
+	var closeErr error
+	defer func() {
+		if cErr := out.Close(); cErr != nil && closeErr == nil {
+			closeErr = cErr
+		}
+	}()
 
 	// Header — small, deterministic.
 	header := fmt.Sprintf("# Story %s — context bundle\n\n"+
@@ -186,8 +218,26 @@ func BuildStoryContext(outPath string, sources StoryContextSources) (*StoryConte
 		return nil, fmt.Errorf("story context: write footer: %w", err)
 	}
 
-	if info, err := os.Stat(outPath); err == nil {
-		bundle.TotalBytes = info.Size()
+	// Explicit close before stat — required because some filesystems
+	// (and the test fakes) don't expose accurate size until the writer
+	// fd is closed. We drive the close here so we can surface its error
+	// (issue #71: legacy code deferred-and-discarded Close errors, which
+	// hid mid-write flush failures behind a "success" exit). The defer
+	// remains as a safety net for early-error paths above.
+	if cErr := out.Close(); cErr != nil {
+		closeErr = cErr
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("story context: close %s: %w", outPath, closeErr)
+	}
+
+	info, err := os.Stat(outPath)
+	if err != nil {
+		return nil, fmt.Errorf("story context: stat %s: %w", outPath, err)
+	}
+	bundle.TotalBytes = info.Size()
+	if bundle.TotalBytes == 0 {
+		return nil, fmt.Errorf("story context: wrote zero bytes to %s", outPath)
 	}
 	return bundle, nil
 }
